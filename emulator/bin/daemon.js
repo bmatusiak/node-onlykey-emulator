@@ -24,7 +24,7 @@ const { spawnSync } = require('child_process');
 const path = require('path');
 
 const emu = require('../index');
-const IpcServer = require('../lib/ipc-server');
+const IpcPeer = require('../lib/ipc-peer');
 const { defaultSocketPath } = require('../lib/protocol');
 
 /* Exit codes are how pm2 tells a reboot from a real failure. */
@@ -32,14 +32,15 @@ const EXIT_RESTART = 0;   // expected: firmware reboot, pm2 should respawn
 const EXIT_FATAL = 1;
 
 function parseArgs(argv) {
-  const out = { uhid: true, socket: defaultSocketPath(), storage: null };
+  const out = { uhid: true, socket: defaultSocketPath(), storage: null, quiet: false };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--no-uhid') out.uhid = false;
+    else if (a === '--quiet') out.quiet = true;
     else if (a === '--socket') out.socket = argv[++i];
     else if (a === '--storage') out.storage = argv[++i];
     else if (a === '--help' || a === '-h') {
-      console.log('usage: daemon.js [--socket PATH] [--storage DIR] [--no-uhid]');
+      console.log('usage: daemon.js [--socket PATH] [--storage DIR] [--no-uhid] [--quiet]');
       process.exit(0);
     }
   }
@@ -53,18 +54,36 @@ async function main() {
   emu.start({ storageDir: args.storage });
   log(`firmware running, storage: ${emu.storageDir}`);
 
-  const ipc = new IpcServer(emu, { socketPath: args.socket });
-  ipc.on('listening', (p) => log(`IPC listening on ${p}`));
-  ipc.on('client', (n) => log(`GUI connected (${n} client${n === 1 ? '' : 's'})`));
+  /*
+   * Tee the firmware's SEREMU output to stdout as well as to IPC clients.
+   * Without this it is only visible to something attached to the socket, so
+   * `pm2 logs` shows the daemon's own lines but none of the device's - which
+   * makes anything that goes wrong before a client attaches invisible.
+   * Written raw, with no prefix, so it reads as the device's own console.
+   * --quiet suppresses it; the firmware is chatty in DEBUG builds.
+   */
+  if (!args.quiet) emu.on('log', (text) => process.stdout.write(text));
+
+  /*
+   * The GUI listens; we dial out. This process restarts on every
+   * CPU_RESTART(), so it must not be the one owning the socket - see
+   * lib/ipc-host.js. With no GUI running this retries quietly and the
+   * emulator runs headless.
+   */
+  const ipc = new IpcPeer(emu, { socketPath: args.socket });
+  ipc.on('connect', () => log(`attached to GUI at ${ipc.socketPath}`));
+  ipc.on('disconnect', () => log('GUI detached - retrying'));
   ipc.on('error', (err) => log('IPC error:', err.message));
 
   /* Optional UHID bridge - presents the emulated device to the real OS. */
+  let bridge = null;
   if (args.uhid) {
     try {
       const UhidBridge = require('../lib/uhid-bridge');
-      const bridge = new UhidBridge(emu);
+      bridge = new UhidBridge(emu);
       bridge.start();
       ipc.uhid = true;
+      ipc.plugged = true;
       log('UHID bridge active - device visible to the OS');
     } catch (err) {
       ipc.uhid = false;
@@ -73,7 +92,20 @@ async function main() {
     }
   }
 
-  await ipc.listen();
+  /*
+   * Plug / unplug from the GUI. This tears the HID interfaces down and back
+   * up, so the OS and every client see the key removed and reinserted, while
+   * the firmware keeps running - the USB cable, not the power.
+   */
+  ipc.on('set-plugged', (want) => {
+    if (!bridge) return;
+    const changed = want ? bridge.plug() : bridge.unplug();
+    if (changed) log(want ? 'plugged in - HID interfaces created'
+                          : 'unplugged - HID interfaces removed');
+    ipc.publishPlugged(bridge.plugged);
+  });
+
+  ipc.start();
 
   /*
    * Shutting down has to thread a needle between two deadlocks, both of which

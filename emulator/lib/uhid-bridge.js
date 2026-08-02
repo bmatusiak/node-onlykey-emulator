@@ -36,6 +36,25 @@ const UHID_SET_REPORT_REPLY = 14;
 const VENDOR_ID = 0x1d50;
 const PRODUCT_ID = 0x60fc;
 
+/*
+ * Identity strings, matched to real hardware because clients filter on them.
+ *
+ * python-onlykey's Client._connect() accepts a device only when
+ *   (vendor_id, product_id) in DEVICE_IDS
+ *   and serial_number == '1000000000'
+ *   and (usage_page == 0xffab or interface_number == 2)
+ * so the serial has to be exactly this - it is the same value
+ * scripts/emulate-onlykey-hid.sh writes into the gadget's serialnumber
+ * string, and what the firmware reports over USB.
+ *
+ * hidapi surfaces UHID's `name` as product_string and `uniq` as
+ * serial_number. All four interfaces share them, exactly as the four
+ * interfaces of one physical device do; the usage page is what tells them
+ * apart.
+ */
+const PRODUCT_NAME = 'ONLYKEY';
+const SERIAL_NUMBER = '1000000000';
+
 /* ---------------------------------------------------------------------------
  * Report descriptors, transcribed from OnlyKey-Firmware/usb_desc.c.
  * ------------------------------------------------------------------------ */
@@ -107,15 +126,21 @@ const SEREMU_DESC = Buffer.from([
   0xC0,
 ]);
 
+/*
+ * inSize / outSize are the declared report counts, and they are NOT always
+ * equal: SEREMU is asymmetric (usb_desc.h SEREMU_TX_SIZE 64, SEREMU_RX_SIZE
+ * 32). A host reads exactly inSize bytes per input report, so sending 32 where
+ * the descriptor says 64 means hidapi readers see nothing at all.
+ */
 const INTERFACES = [
   { iface: IFACE.KEYBOARD, name: 'Keyboard', desc: KEYBOARD_DESC,
-    reportSize: 8, writable: false },
+    inSize: 8, outSize: 8, writable: false },
   { iface: IFACE.FIDO, name: 'RawHID (FIDO)', desc: rawhidDesc(0xF1D0, 0x01),
-    reportSize: 64, writable: true },
+    inSize: 64, outSize: 64, writable: true },
   { iface: IFACE.VENDOR, name: 'RawHID2 (vendor)', desc: rawhidDesc(0xFFAB, 0x02),
-    reportSize: 64, writable: true },
+    inSize: 64, outSize: 64, writable: true },
   { iface: IFACE.SEREMU, name: 'SEREMU (debug)', desc: SEREMU_DESC,
-    reportSize: 32, writable: true },
+    inSize: 64, outSize: 32, writable: true },
 ];
 
 /*
@@ -142,6 +167,30 @@ function buildCreate2(name, uniq, desc) {
   return buf;
 }
 
+/*
+ * Reconcile the two conventions clients use when writing a HID report.
+ *
+ * UHID hands us the write buffer verbatim - the kernel does not strip
+ * anything - so what arrives depends entirely on the client:
+ *
+ *   hidapi's documented convention prepends a report-number byte (0 for
+ *   devices with no report IDs), giving reportSize + 1 bytes.
+ *
+ *   python-onlykey does that only on Windows; on Linux its MESSAGE_HEADER is
+ *   [255,255,255,255] and it writes exactly 64 bytes with no prefix
+ *   (client.py, MAX_INPUT_REPORT_SIZE).
+ *
+ * None of OnlyKey's descriptors declare report IDs, so on real hardware the
+ * whole buffer is the payload. Stripping unconditionally shifted
+ * python-onlykey's header to FF FF FF and the firmware ignored the packet;
+ * never stripping breaks the hidapi convention instead. So strip only the
+ * one case that is unambiguous - an extra leading zero byte.
+ */
+function stripReportId(data, reportSize) {
+  if (data.length === reportSize + 1 && data[0] === 0x00) return data.subarray(1);
+  return data;
+}
+
 class UhidDevice {
   constructor(spec, onOutput, hooks = {}) {
     this.spec = spec;
@@ -156,8 +205,7 @@ class UhidDevice {
   start() {
     this.fd = fs.openSync('/dev/uhid', 'r+');
     fs.writeSync(this.fd,
-      buildCreate2(`OnlyKey Emulator ${this.spec.name}`,
-                   `okemu-${this.spec.iface}`, this.spec.desc));
+      buildCreate2(PRODUCT_NAME, SERIAL_NUMBER, this.spec.desc));
     this._read();
   }
 
@@ -188,9 +236,17 @@ class UhidDevice {
         /*
          * struct uhid_output_req: data[4096] size(u16) rtype(u8), after the
          * u32 type. This is host -> device: a client wrote a report to us.
+         *
+         * data[0] is the report NUMBER, not payload. Our descriptors declare
+         * no report IDs, so hidraw requires callers to prepend a 0 byte and
+         * passes it straight through - a 64-byte RawHID report arrives here
+         * as 65 bytes beginning 0x00. Forwarding that verbatim shifts every
+         * field by one and the firmware silently ignores the packet, which is
+         * exactly how this presented: writes accepted, nothing ever parsed.
          */
         const size = ev.readUInt16LE(4 + 4096);
-        if (size > 0) this.onOutput(ev.subarray(4, 4 + size));
+        if (size > 0) this.onOutput(stripReportId(ev.subarray(4, 4 + size),
+                                                  this.spec.outSize));
         break;
       }
 
@@ -294,6 +350,39 @@ class UhidBridge {
       );
     }
 
+    this._createDevices();
+
+    /* Device -> host. onStream carries every interface; forward only the
+     * outbound half, to the node representing that interface. */
+    this._onStream = ({ buffer, iface, dir }) => {
+      if (dir !== 'out') return;
+      const dev = this.devices.get(iface);
+      if (!dev) return;
+
+      /*
+       * HID input reports are fixed-size: a host reads exactly the count the
+       * descriptor declares. The firmware writes SEREMU text at its natural
+       * length ("Enter PIN\r\n" is 11 bytes), and on real hardware
+       * usb_seremu_write() packs that into full 64-byte USB packets. Passing
+       * the short buffer straight through meant hidapi readers - the test
+       * harness's SeremuChannel among them - saw nothing at all, even though
+       * the IPC stream showed the text fine.
+       *
+       * Split into descriptor-sized chunks, zero-padded, exactly as the device
+       * puts them on the wire.
+       */
+      const size = dev.spec.inSize;
+      for (let off = 0; off < buffer.length; off += size) {
+        const chunk = Buffer.alloc(size);
+        buffer.copy(chunk, 0, off, Math.min(off + size, buffer.length));
+        dev.send(chunk);
+      }
+    };
+    this.emu.on('stream', this._onStream);
+    return this;
+  }
+
+  _createDevices() {
     for (const spec of INTERFACES) {
       /*
        * The keyboard interface carries OnlyKey's Yubikey OTP / HMAC-SHA1
@@ -314,22 +403,39 @@ class UhidBridge {
       dev.start();
       this.devices.set(spec.iface, dev);
     }
-
-    /* Device -> host. onStream carries every interface; forward only the
-     * outbound half, to the node representing that interface. */
-    this._onStream = ({ buffer, iface, dir }) => {
-      if (dir !== 'out') return;
-      const dev = this.devices.get(iface);
-      if (dev) dev.send(buffer);
-    };
-    this.emu.on('stream', this._onStream);
-    return this;
   }
 
   stop() {
     if (this._onStream) this.emu.off('stream', this._onStream);
     for (const dev of this.devices.values()) dev.destroy();
     this.devices.clear();
+  }
+
+  /*
+   * Plug / unplug, modelling the USB cable rather than the process.
+   *
+   * Destroying the UHID devices makes the OS tear down the hidraw nodes, so
+   * every client - browsers, python-onlykey, the test harness - sees the key
+   * genuinely disappear, which is what TC-07's "real physical unplug" needs.
+   * The firmware thread keeps running with its RAM state intact; a true power
+   * cycle is the separate restart path.
+   *
+   * Node numbers are reassigned on re-plug, exactly as they are on real
+   * re-enumeration, so clients must re-enumerate rather than reuse a handle.
+   */
+  get plugged() { return this.devices.size > 0; }
+
+  unplug() {
+    if (!this.plugged) return false;
+    for (const dev of this.devices.values()) dev.destroy();
+    this.devices.clear();
+    return true;
+  }
+
+  plug() {
+    if (this.plugged) return false;
+    this._createDevices();
+    return true;
   }
 }
 

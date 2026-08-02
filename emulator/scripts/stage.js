@@ -95,6 +95,29 @@ const PATCHES = [
     ],
   },
   {
+    file: 'libraries/onlykey/okcore.cpp',
+    edits: [
+      // HW_MODEL() returns a pointer to a stack-allocated VLA:
+      //     char out[strlen(in)+2];  ...  return (char*)out;
+      // The array dies with the frame, so the caller reads freed stack. On the
+      // MK20DX256 (bare metal, -Os, one thread, no red zone reuse before the
+      // callee runs) the bytes survive long enough for hidprint() to copy them,
+      // so the device works. Hosted, the very next call clobbers that frame and
+      // hidprint() dereferences null - which crashed the daemon on any status
+      // reply, e.g. python-onlykey's settime.
+      //
+      // A function-static buffer has the same single-threaded lifetime the
+      // firmware already assumes (the result is consumed immediately by
+      // hidprint) and removes the UB. Bounded so a long input cannot overrun.
+      ['\tchar out[strlen(in)+2];\n\tmemcpy(out,in,strlen(in));',
+       '\tstatic char out[64];\n\tsize_t okemu_n = strlen(in);\n' +
+       '\tif (okemu_n > sizeof(out) - 2) okemu_n = sizeof(out) - 2;\n' +
+       '\tmemcpy(out, in, okemu_n);'],
+      ['out[sizeof(out)-2]', 'out[okemu_n]'],
+      ['\tout[sizeof(out)-1] = 0;', '\tout[okemu_n + 1] = 0;'],
+    ],
+  },
+  {
     file: 'libraries/password/password.cpp',
     edits: [
       // password.cpp re-declares Profile_Offset at two different block scopes

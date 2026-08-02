@@ -19,13 +19,18 @@
 #      the seat - no group juggling, and it drops again when you log out.
 #      A group fallback is included for headless/CI machines with no seat.
 #
-# Deliberately NOT changed:
+#   3. Lowers vm.mmap_min_addr to 4096 (one page).
 #
-#   * vm.mmap_min_addr. The emulator maps the emulated flash array at its real
-#     MK20DX256 addresses, and the region below 64 KiB would need this lowered.
-#     It falls back to mapping from 0x10000 instead, which still covers all
-#     device storage. Lowering mmap_min_addr weakens a real kernel mitigation
-#     against NULL-pointer exploitation, and the emulator does not need it.
+#      The emulator maps the emulated flash at its real MK20DX256 addresses,
+#      and the firmware's own key material sits low: certified_hw is
+#      enckeysectoradr+432 = 0x5BB0, and okcrypto_split_sundae() dereferences
+#      it on EVERY AES-GCM operation. With the default 65536 that address is
+#      unmappable, so the device segfaults as soon as it encrypts anything -
+#      storing a PIN, for instance.
+#
+#      4096, not 0: page zero stays unmapped, so a genuine NULL dereference
+#      still faults. That is the mitigation this sysctl exists for, and it is
+#      preserved. Setting it to 0 would not be.
 #
 set -euo pipefail
 
@@ -85,6 +90,16 @@ if [[ -n "$TARGET_USER" && "$TARGET_USER" != "root" ]]; then
     NEED_RELOGIN=1
   fi
 fi
+
+echo "==> Lowering vm.mmap_min_addr to 4096 (page zero stays protected)"
+sysctl -w vm.mmap_min_addr=4096 >/dev/null
+cat > /etc/sysctl.d/70-onlykey-emulator.conf <<'EOF'
+# The OnlyKey emulator maps the emulated MK20DX256 flash at its real
+# addresses; the firmware's key material lives at 0x5BB0 and is read by every
+# AES-GCM operation. One page, so NULL dereferences still fault.
+vm.mmap_min_addr = 4096
+EOF
+echo "    now: $(sysctl -n vm.mmap_min_addr)"
 
 echo "==> Reloading udev rules"
 udevadm control --reload-rules

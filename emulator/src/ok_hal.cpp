@@ -23,7 +23,7 @@ namespace {
 
 /* ------------------------------------------------------------ regions */
 
-struct Region { uintptr_t base; size_t len; const char *name; };
+struct Region { uintptr_t base; size_t len; const char *name; bool required; };
 
 /*
  * Kinetis peripheral windows the firmware touches, plus the Cortex-M system
@@ -31,9 +31,16 @@ struct Region { uintptr_t base; size_t len; const char *name; };
  * unmodified: FTFL_*, SIM_*, PORTx_PCR*, TSI0_* all become plain loads/stores.
  */
 const Region kPeripherals[] = {
-  { 0x40000000UL, 0x00100000UL, "peripheral bridge" }, /* FTFL, SIM, PORT, TSI, ADC */
-  { 0x42000000UL, 0x02000000UL, "bitband alias"     },
-  { 0xE0000000UL, 0x00100000UL, "cortex-m system"   }, /* SysTick, NVIC, SCB */
+  { 0x40000000UL, 0x00100000UL, "peripheral bridge", true  }, /* FTFL, SIM, PORT, TSI, ADC */
+  /*
+   * The bit-band alias is 32 MB and the firmware never uses the bit-band
+   * macros, so it is optional. Reserving that much fixed address space
+   * regularly collided with V8's own heap - MAP_FIXED_NOREPLACE then returns
+   * EEXIST and, because ASLR moves the heap each run, the daemon crash-looped
+   * intermittently. Skip it when the address is taken.
+   */
+  { 0x42000000UL, 0x02000000UL, "bitband alias",     false },
+  { 0xE0000000UL, 0x00100000UL, "cortex-m system",   true  }, /* SysTick, NVIC, SCB */
 };
 
 /* Registers the firmware reads for identity/state, by absolute address. */
@@ -155,6 +162,11 @@ void okemu_map_peripherals(void) {
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     if (p == MAP_FAILED || (uintptr_t)p != r.base) {
       if (p != MAP_FAILED) munmap(p, r.len);
+      if (!r.required) {
+        fprintf(stderr, "[okemu] note: %s at %#lx unavailable (%s) - skipped\n",
+                r.name, (unsigned long)r.base, strerror(errno));
+        continue;
+      }
       g_map_status = errno ? errno : EFAULT;
       snprintf(g_map_error, sizeof g_map_error,
                "cannot map %s at %#lx: %s", r.name, (unsigned long)r.base,
@@ -252,22 +264,47 @@ int okemu_hal_init(const char *storage_dir, char *err, size_t errlen) {
     fp = MAP_FAILED;
   }
   if (fp == MAP_FAILED) {
-    /* Retry from the lowest address an unprivileged process may map. This
-     * still covers the entire storage area (flashstorestart = 0x3A800); only
-     * the firmware-image region used by fw_hash() is left out. */
-    low_mapped = false;
-    off = 0x10000;
-    fp = mmap((void *)(OKEMU_FLASH_BASE + off), OKEMU_FLASH_SIZE - off,
-              PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED_NOREPLACE,
-              g.flash_fd, (off_t)off);
-    if (fp == MAP_FAILED || (uintptr_t)fp != OKEMU_FLASH_BASE + off) {
-      if (fp != MAP_FAILED) munmap(fp, OKEMU_FLASH_SIZE - off);
+    /*
+     * vm.mmap_min_addr blocks the bottom of the address space, so walk up
+     * until something sticks. How far we get decides what works:
+     *
+     *   0x0000  everything, including fw_hash()'s walk from fwstartadr.
+     *   0x1000  enough for real use. The firmware's own key material lives
+     *           here - certified_hw is enckeysectoradr+432 = 0x5BB0 - and
+     *           okcrypto_split_sundae() dereferences it on EVERY AES-GCM
+     *           operation, so without this the device segfaults the moment it
+     *           encrypts anything (e.g. storing a PIN). 4096 is the useful
+     *           setting: it still leaves page 0 unmapped, so genuine NULL
+     *           dereferences fault exactly as they should.
+     *   0x10000 the unprivileged default. Storage at 0x3A800 is reachable and
+     *           the device boots, but any crypto that touches certified_hw
+     *           will crash. Usable only for HID/protocol work.
+     */
+    static const size_t kFallbacks[] = { 0x1000, 0x10000 };
+    for (size_t i = 0; i < sizeof kFallbacks / sizeof *kFallbacks; i++) {
+      off = kFallbacks[i];
+      fp = mmap((void *)(OKEMU_FLASH_BASE + off), OKEMU_FLASH_SIZE - off,
+                PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED_NOREPLACE,
+                g.flash_fd, (off_t)off);
+      if (fp != MAP_FAILED && (uintptr_t)fp == OKEMU_FLASH_BASE + off) break;
+      if (fp != MAP_FAILED) { munmap(fp, OKEMU_FLASH_SIZE - off); fp = MAP_FAILED; }
+    }
+    if (fp == MAP_FAILED) {
       snprintf(err, errlen,
-               "cannot map flash at %#lx: %s "
-               "(vm.mmap_min_addr=%s blocks the low mapping)",
-               (unsigned long)(OKEMU_FLASH_BASE + off), strerror(errno),
-               "65536 by default");
+               "cannot map flash: %s - lower vm.mmap_min_addr "
+               "(sudo sysctl -w vm.mmap_min_addr=4096)", strerror(errno));
       return -1;
+    }
+    low_mapped = false;
+
+    if (off > 0x5BB0UL) {
+      fprintf(stderr,
+              "[okemu] WARNING: flash mapped from %#lx; the firmware's key "
+              "material at 0x5BB0 (certified_hw) is NOT mapped.\n"
+              "[okemu]          Crypto operations will crash. Run "
+              "scripts/setup-permissions.sh, or:\n"
+              "[okemu]          sudo sysctl -w vm.mmap_min_addr=4096\n",
+              (unsigned long)off);
     }
   }
   g.flash = (uint8_t *)OKEMU_FLASH_BASE;
@@ -399,12 +436,21 @@ int okemu_hid_deliver(const uint8_t *data, size_t len, int iface) {
   pkt.iface = iface;
   pkt.data.assign(64, 0);
   memcpy(pkt.data.data(), data, len < 64 ? len : 64);
+
+  /*
+   * Snapshot before handing the packet to the queue: push_back(std::move(pkt))
+   * leaves pkt.data empty, so reading pkt.data.data() afterwards dereferences
+   * null and takes the process down. Every inbound RawHID report hit this.
+   */
+  uint8_t snap[64];
+  memcpy(snap, pkt.data.data(), 64);
+
   {
     std::lock_guard<std::mutex> lk(g.mu);
     g.hid_in.push_back(std::move(pkt));
   }
   g.hid_cv.notify_one();
-  stream_emit(pkt.data.data(), 64, iface, OKEMU_DIR_IN);
+  stream_emit(snap, sizeof snap, iface, OKEMU_DIR_IN);
   return 0;
 }
 

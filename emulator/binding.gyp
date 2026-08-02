@@ -105,7 +105,23 @@
       ],
       "defines": ["NAPI_DISABLE_CPP_EXCEPTIONS"],
       "cflags_cc": ["-std=gnu++17", "-fexceptions"],
-      "cflags_cc!": ["-fno-exceptions", "-fno-rtti"]
+      "cflags_cc!": ["-fno-exceptions", "-fno-rtti"],
+
+      # -Bsymbolic: bind the firmware's internal calls to its OWN definitions.
+      #
+      # The firmware was written for a freestanding target where the only code
+      # in the image is its own, so it uses names that collide with libc -
+      # okcore.cpp defines `recvmsg`, the OnlyKey message pump. Built as a
+      # shared object those symbols are exported with default visibility and
+      # their call sites go through the PLT, so the dynamic linker resolves
+      # them against the global scope - node and libc - first. glibc exports
+      # recvmsg(2), so every `recvmsg(0)` in the firmware was calling the
+      # SOCKET syscall instead: it failed silently, and the device accepted HID
+      # packets while never once reading them.
+      #
+      # -Bsymbolic resolves defined symbols within this module and leaves
+      # undefined ones (the N-API entry points, libc) alone.
+      "ldflags": ["-Wl,-Bsymbolic", "-rdynamic"]
     }
   ]
 }

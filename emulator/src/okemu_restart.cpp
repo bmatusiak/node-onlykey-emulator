@@ -22,6 +22,8 @@
  * unprotect the page and let the store retry so the firmware keeps running.
  */
 #include <signal.h>
+#include <execinfo.h>
+#include <stdlib.h>
 #include <time.h>
 #include <setjmp.h>
 #include <sys/mman.h>
@@ -52,6 +54,22 @@ void segv_handler(int sig, siginfo_t *info, void *uctx) {
   const uintptr_t at = (uintptr_t)info->si_addr;
 
   if (g_armed && at >= kAIRCR && at < kAIRCR + 4) {
+    /*
+     * The firmware has ~10 CPU_RESTART() sites (integrity check, PIN flows,
+     * wipes, bootloader entry) and they all look identical from outside: the
+     * process just exits and pm2 respawns it. Reporting the call stack turns
+     * "it rebooted" into "it rebooted HERE", which is the only practical way
+     * to tell an expected reboot from a spurious one.
+     *
+     * Off by default - a reboot is normal operation. Set OKEMU_TRACE_RESTART=1.
+     */
+    if (getenv("OKEMU_TRACE_RESTART")) {
+      static const char msg[] = "\n[okemu] CPU_RESTART() from:\n";
+      write(STDERR_FILENO, msg, sizeof msg - 1);
+      void *frames[24];
+      int depth = backtrace(frames, 24);
+      backtrace_symbols_fd(frames, depth, STDERR_FILENO);
+    }
     okemu_request_restart();
     siglongjmp(g_park, 1);            /* never returns */
   }
@@ -62,8 +80,25 @@ void segv_handler(int sig, siginfo_t *info, void *uctx) {
     return;
   }
 
-  /* A genuine crash - restore the default handler and let it stand, so we
-   * don't turn a real bug into a silent hang. */
+  /*
+   * A genuine crash. Print a backtrace before letting the default handler
+   * take it: the firmware runs on its own thread inside a Node addon, so a
+   * fault here shows up only as pm2 silently respawning the daemon, with
+   * nothing in either log to say why. ptrace_scope commonly blocks attaching
+   * gdb after the fact, so self-reporting is the reliable option.
+   */
+  {
+    static const char msg[] = "\n[okemu] FATAL: segfault at ";
+    write(STDERR_FILENO, msg, sizeof msg - 1);
+    char addr[32];
+    int n = snprintf(addr, sizeof addr, "%p\n", info->si_addr);
+    write(STDERR_FILENO, addr, n > 0 ? (size_t)n : 0);
+
+    void *frames[32];
+    int depth = backtrace(frames, 32);
+    backtrace_symbols_fd(frames, depth, STDERR_FILENO);
+  }
+
   sigaction(SIGSEGV, &g_prev_segv, nullptr);
   (void)sig; (void)uctx;
 }

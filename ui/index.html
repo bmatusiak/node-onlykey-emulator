@@ -96,6 +96,7 @@
   <h1>OnlyKey Emulator</h1>
   <div class="status"><span class="dot" id="dot"></span><span id="conn">connecting…</span></div>
   <div class="spacer"></div>
+  <button id="btn-plug">Unplug</button>
   <button id="btn-restart">Restart device</button>
   <button id="btn-rebuild">Rebuild &amp; restart</button>
   <button id="btn-reset" class="danger">Factory reset</button>
@@ -156,24 +157,24 @@ const logEl = $('log');
  * process.cwd() IS correct (the app directory), so that is the fallback that
  * actually works; the others are tried first in case a future runtime differs.
  */
-function loadIpcClient() {
+function loadIpcHost() {
   const tried = [];
   const attempts = [
-    () => require('../emulator/lib/ipc-client'),
+    () => require('../emulator/lib/ipc-host'),
     () => {
       const path = require('path');
       const dir = decodeURIComponent(new URL('.', window.location.href).pathname);
-      return require(path.join(dir, '..', 'emulator', 'lib', 'ipc-client'));
+      return require(path.join(dir, '..', 'emulator', 'lib', 'ipc-host'));
     },
     () => {
       const path = require('path');
-      return require(path.join(process.cwd(), '..', 'emulator', 'lib', 'ipc-client'));
+      return require(path.join(process.cwd(), '..', 'emulator', 'lib', 'ipc-host'));
     },
   ];
   for (const fn of attempts) {
     try { return fn(); } catch (err) { tried.push(err.message); }
   }
-  throw new Error('cannot load ipc-client:\n  ' + tried.join('\n  '));
+  throw new Error('cannot load ipc-host:\n  ' + tried.join('\n  '));
 }
 
 const IFACE_TAG = { 0: 'HID1', 1: 'HID2', 2: 'HID3', 3: 'HID4' };
@@ -258,37 +259,51 @@ for (let n = 1; n <= 6; n++) {
 }
 
 /* ---------- connection ---------- */
-let IpcClient;
+let IpcHost;
 try {
-  IpcClient = loadIpcClient();
+  IpcHost = loadIpcHost();
 } catch (err) {
   fatal(err);
   throw err;
 }
 
-const client = new IpcClient();
+/*
+ * The GUI owns the socket and the emulator dials in. The emulator restarts on
+ * every device reboot, so it must not be the process holding the socket - this
+ * way a reboot is just a client disconnect, and this window keeps its log and
+ * state throughout.
+ */
+const client = new IpcHost();
 
-client.on('connect', () => {
+client.on('listening', (p) => { $('sock').textContent = 'socket: ' + p; sys('listening on ' + p); });
+
+client.on('device-connect', () => {
   $('dot').classList.add('on');
-  $('conn').textContent = 'connected';
+  $('conn').textContent = 'device attached';
   client.getState();
 });
 
-client.on('disconnect', () => {
+client.on('device-disconnect', () => {
   $('dot').classList.remove('on');
-  $('conn').textContent = 'reconnecting…';
-  sys('emulator went away (restart or stop) — retrying');
+  $('conn').textContent = 'waiting for device…';
+  sys('emulator detached (reboot or stop) — waiting for it to dial back in');
 });
 
+client.on('plugged', (m) => setPluggedUi(m.plugged));
+
 client.on('ready', (m) => {
-  $('sock').textContent = 'socket: ' + client.socketPath;
   $('uhid').textContent = 'uhid: ' + (m.uhid ? 'active' : 'unavailable');
+  setPluggedUi(m.plugged);
+  /* The device sends its current colour on connect, so a GUI started after
+   * the emulator shows the real LED at once rather than black. */
+  if (m.led) paintLeds(m.led);
   if (m.storageDir) $('store').textContent = 'storage: ' + m.storageDir;
   sys('attached to emulator v' + m.version);
 });
 
 client.on('state', (m) => {
   if (m.led) paintLeds(m.led);
+  setPluggedUi(m.plugged);
   $('uhid').textContent = 'uhid: ' + (m.uhid ? 'active' : 'unavailable');
   if (m.storageDir) $('store').textContent = 'storage: ' + m.storageDir;
 });
@@ -308,7 +323,7 @@ client.on('hid', (m) => {
   append(IFACE_TAG[m.iface], 'hid' + (m.iface + 1), arrow + hex(m.data), m.dir === 'in');
 });
 
-client.connect();
+client.listen();
 
 /* ---------- LED ---------- */
 function paintLeds(pixels) {
@@ -330,7 +345,33 @@ document.querySelectorAll('.chip[data-iface]').forEach((chip) => {
   });
 });
 
-$('btn-clear').addEventListener('click', () => { logEl.textContent = ''; });
+/*
+ * Plug / unplug models the USB cable: it tears the HID interfaces down and
+ * back up, so the OS and every client see the key removed and reinserted. The
+ * firmware keeps running with its RAM intact - for a power cycle use Restart.
+ */
+let plugged = true;
+function setPluggedUi(v) {
+  if (typeof v === 'boolean') plugged = v;
+  $('btn-plug').textContent = plugged ? 'Unplug' : 'Plug in';
+  $('btn-plug').classList.toggle('danger', plugged);
+}
+$('btn-plug').addEventListener('click', () => {
+  const want = !plugged;
+  client._send({ t: 'setPlugged', plugged: want });
+  sys(want ? 'plugging in…' : 'unplugging…');
+});
+setPluggedUi(true);
+
+$('btn-clear').addEventListener('click', () => {
+  /*
+   * replaceChildren() rather than textContent='': the log rows are elements,
+   * and the half-line still sitting in the SEREMU reassembly buffer has to go
+   * too, or it gets flushed into the "cleared" view a moment later.
+   */
+  logEl.replaceChildren();
+  seremuPending = '';
+});
 $('btn-restart').addEventListener('click', () => client.restartDevice());
 $('btn-rebuild').addEventListener('click', () => {
   sys('rebuilding — the daemon stays up if the build fails');

@@ -72,11 +72,24 @@ ls -l /dev/uhid      # should no longer be  crw------- root root
 > for headless machines with no seat. See
 > [scripts/70-onlykey-emulator.rules](scripts/70-onlykey-emulator.rules).
 
-> **Not required:** lowering `vm.mmap_min_addr`. The emulator maps the emulated
-> flash at its real MK20DX256 addresses and falls back to mapping from
-> `0x10000` when the lowest 64 KiB is unavailable, which still covers all
-> device storage. Lowering that sysctl weakens a real kernel mitigation and the
-> emulator does not need it.
+The script also lowers `vm.mmap_min_addr` to **4096**:
+
+```sh
+sudo sysctl -w vm.mmap_min_addr=4096
+```
+
+The emulator maps the emulated flash at its real MK20DX256 addresses, and the
+firmware's key material sits low — `certified_hw` is `enckeysectoradr + 432` =
+`0x5BB0`, and `okcrypto_split_sundae()` dereferences it on *every* AES-GCM
+operation. At the default 65536 that address cannot be mapped and the device
+segfaults the moment it encrypts anything, such as storing a PIN.
+
+> **4096, not 0.** Page zero stays unmapped, so a genuine NULL dereference
+> still faults — the mitigation this sysctl exists for is preserved. The
+> emulator only needs to reach `0x5800`.
+
+Without it the emulator still boots and the HID interfaces work, but any
+crypto operation will crash; it prints a warning at startup saying so.
 
 ### 3. Build the native module
 
@@ -103,8 +116,21 @@ Flash and EEPROM are files, so **a reboot is not a factory reset** — the
 emulated device keeps its keys, PINs and slots, exactly as hardware keeps flash
 across a reset.
 
-The daemon listens on a Unix domain socket, by default
-`$XDG_RUNTIME_DIR/onlykey-emulator.sock`, mode `0600`.
+### IPC topology
+
+The **GUI listens** and the **emulator dials in** — the reverse of the obvious
+arrangement, and deliberately so. The emulator exits on every `CPU_RESTART()`
+and is respawned by pm2, so it is the wrong process to own the socket: each
+reboot would destroy it and leave the GUI reconnecting into a race (and a
+socket file left by a killed process makes the next bind fail with
+EADDRINUSE). With the long-lived process listening, a device reboot is just a
+client disconnect and reconnect, and the GUI keeps its window, log and state.
+
+Socket: `$XDG_RUNTIME_DIR/onlykey-emulator.sock`, mode `0600`.
+
+Running headless is fine — with nothing listening the emulator retries quietly
+and carries on. The HID interfaces do not depend on this channel, so the test
+harness works with no GUI running.
 
 ### The GUI
 
@@ -119,9 +145,16 @@ short press, hold past 400 ms for a long one), and a colour-coded log of every
 HID interface with per-interface filters. Toolbar buttons cover restart,
 rebuild-and-restart, and factory reset.
 
-The GUI is only an IPC client — start the emulator with pm2 first. It holds no
-authority over the device and reconnects on its own, so it survives the daemon
-being restarted underneath it; the status dot goes red and back to green.
+The GUI hosts the IPC socket, so it can be started before or after the
+emulator — the emulator dials in whenever it comes up. It holds no authority
+over the device and survives the daemon restarting underneath it; the status
+dot goes red and back to green as the device detaches and re-attaches.
+
+**Unplug / Plug in** models the USB cable: it tears the HID interfaces down and
+back up, so the OS and every client see the key removed and reinserted (hidraw
+nodes are renumbered on re-plug, exactly as on real re-enumeration). The
+firmware keeps running with its RAM intact — for a power cycle use *Restart
+device*.
 
 ---
 
@@ -139,17 +172,19 @@ emu.pressButton(3);                  // short press
 emu.pressButton(1, { long: true });  // long press
 ```
 
-Or over IPC, which is what the GUI uses and what survives restarts:
+Or over IPC — host the socket and let the emulator dial in. This is what the
+GUI does, and it is what survives device reboots:
 
 ```js
-const IpcClient = require('./emulator/lib/ipc-client');
-const c = new IpcClient().connect();
+const IpcHost = require('./emulator/lib/ipc-host');
+const h = new IpcHost().listen();
 
-c.on('ready', (m) => console.log('attached', m));
-c.on('log',   (m) => process.stdout.write(m.text));
-c.on('restart', () => console.log('device rebooted; pm2 is respawning it'));
+h.on('device-connect',    () => console.log('device attached'));
+h.on('device-disconnect', () => console.log('device rebooting; it will dial back in'));
+h.on('log',               (m) => process.stdout.write(m.text));
 
-c.press(3);
+h.press(3);
+h._send({ t: 'setPlugged', plugged: false });   // unplug the USB cable
 ```
 
 ### HID interfaces

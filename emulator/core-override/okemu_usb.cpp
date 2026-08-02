@@ -231,14 +231,41 @@ int okemu_kbd_get_report(uint8_t *out) {
 
 volatile uint8_t usb_seremu_transmit_flush_timer = 0;
 
-int usb_seremu_write(const void *buffer, uint32_t size) {
-  okemu_log((const uint8_t *)buffer, size);
-  return (int)size;
+/*
+ * SEREMU output is buffered into whole packets before it leaves the device,
+ * exactly as the Teensy core does.
+ *
+ * The firmware prints a character at a time (printHex(), Serial.print of an
+ * int), so putchar() is called once per byte. Emitting a HID report per call
+ * meant a 1-byte payload padded to a 64-byte report per CHARACTER: hidraw's
+ * per-reader ring buffer overflowed and the kernel silently dropped reports,
+ * so readers saw shredded, partial text - "Enter PIN" vanished while the
+ * surrounding hex dump survived. On hardware usb_seremu_putchar() fills a
+ * packet and only transmits when it is full or the flush timer fires
+ * (SEREMU_TX_INTERVAL), which is what keeps the rate sane.
+ *
+ * Flush on a full packet or at end of line; the line boundary keeps
+ * interactive output prompt rather than waiting for 64 bytes to accumulate.
+ */
+static uint8_t  s_tx[SEREMU_TX_SIZE];
+static uint32_t s_tx_len = 0;
+
+static void seremu_flush(void) {
+  if (!s_tx_len) return;
+  okemu_log(s_tx, s_tx_len);
+  s_tx_len = 0;
 }
 
 int usb_seremu_putchar(uint8_t c) {
-  okemu_log(&c, 1);
+  s_tx[s_tx_len++] = c;
+  if (s_tx_len >= sizeof(s_tx) || c == '\n') seremu_flush();
   return 1;
+}
+
+int usb_seremu_write(const void *buffer, uint32_t size) {
+  const uint8_t *p = (const uint8_t *)buffer;
+  for (uint32_t i = 0; i < size; i++) usb_seremu_putchar(p[i]);
+  return (int)size;
 }
 
 int  usb_seremu_getchar(void)          { return okemu_seremu_getc(); }
@@ -246,7 +273,7 @@ int  usb_seremu_peekchar(void)         { return okemu_seremu_peek(); }
 int  usb_seremu_available(void)        { return okemu_seremu_avail(); }
 void usb_seremu_flush_input(void)      { okemu_seremu_flush_in(); }
 int  usb_seremu_write_buffer_free(void){ return 63; }
-void usb_seremu_flush_output(void)     {}
+void usb_seremu_flush_output(void)     { seremu_flush(); }
 void usb_seremu_flush_callback(void)   {}
 
 }  // extern "C"
