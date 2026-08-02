@@ -1,0 +1,49 @@
+# udev rule for the OnlyKey emulator.
+#
+# Install to /etc/udev/rules.d/70-onlykey-emulator.rules  (see README.md, or
+# run scripts/setup-permissions.sh which installs this file for you).
+#
+# Why this is needed:
+#   /dev/uhid is root-only by default (crw------- root root). UHID is the
+#   kernel interface the emulator uses to present itself as a real USB HID
+#   device, so browsers (WebAuthn), python-onlykey and the OnlyKey app can
+#   talk to the emulated key exactly as they would to hardware.
+#
+#   With this rule in place, nothing in the emulator needs to run as root -
+#   not the daemon, not pm2, not the GUI.
+#
+# How access is granted:
+#   TAG+="uaccess"  hands the device to whoever is logged in at the local
+#                   seat, via a systemd-logind ACL. This is the preferred
+#                   mechanism: it follows the active session and is revoked
+#                   automatically at logout, so access is not left standing.
+#
+#   GROUP/MODE      fallback for headless, CI or non-systemd machines that
+#                   have no seat for uaccess to attach to. Members of the
+#                   plugdev group get read/write.
+#
+# After installing, reload udev so it takes effect without a reboot:
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=misc --sysname-match=uhid
+
+KERNEL=="uhid", SUBSYSTEM=="misc", TAG+="uaccess", GROUP="plugdev", MODE="0660"
+
+# ---------------------------------------------------------------------------
+# 2. Access to the emulated device's own /dev/hidrawN nodes.
+#
+# Creating the device is only half the problem: the hidraw nodes the kernel
+# then makes are root-only, so python-onlykey, the OnlyKey app and any hidapi
+# client still cannot open them. Real OnlyKey hardware ships an equivalent
+# rule matching its USB vendor/product.
+#
+# A UHID device is virtual, so there is no USB parent carrying
+# ATTRS{idVendor} to match on. What it does have is a parent whose kernel name
+# encodes bus:vendor:product - 0003:1D50:60FC.xxxx - where 0003 is BUS_USB and
+# 1D50:60FC is OnlyKey's VID:PID, both set by the emulator when it creates the
+# device. KERNELS== matches against any parent, so that is what we key on.
+#
+# The FIDO interface usually gets an ACL already, from the distribution's own
+# FIDO/U2F rules that match on the 0xF1D0 usage page. This rule covers all four
+# interfaces uniformly so behaviour does not depend on which distro you are on.
+# ---------------------------------------------------------------------------
+SUBSYSTEM=="hidraw", KERNELS=="0003:1D50:60FC.*", TAG+="uaccess", GROUP="plugdev", MODE="0660"

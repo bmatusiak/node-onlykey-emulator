@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OnlyKey Emulator</title>
+<style>
+  :root {
+    --bg: #14161a;  --panel: #1c1f26;  --panel-2: #23262f;
+    --line: #2e323c; --text: #e6e8ec;  --dim: #8b919d;
+    --accent: #4da3ff; --ok: #3ddc84;  --err: #ff5c5c;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: grid; grid-template-rows: auto 1fr auto; height: 100vh;
+  }
+
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 14px; font-weight: 600; margin: 0; }
+  .status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--err); transition: background .2s; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .spacer { flex: 1; }
+
+  button {
+    font: inherit; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:active { transform: translateY(1px); }
+  button.danger:hover { border-color: var(--err); color: var(--err); }
+
+  main { display: grid; grid-template-columns: 260px 1fr; min-height: 0; }
+  .device {
+    padding: 18px 16px; border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; gap: 18px; overflow-y: auto;
+  }
+  .leds { display: flex; gap: 14px; justify-content: center; padding: 6px 0; }
+  .led {
+    width: 54px; height: 54px; border-radius: 50%;
+    background: #000; border: 2px solid var(--line);
+    transition: background .06s linear, box-shadow .06s linear;
+  }
+  .label { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--dim); }
+
+  .pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .pad button { aspect-ratio: 1; font-size: 17px; font-weight: 600; border-radius: 10px; }
+  .pad button.held { background: var(--accent); color: #06101c; border-color: var(--accent); }
+  .hint { font-size: 11px; color: var(--dim); margin: 0; }
+
+  .logpane { display: grid; grid-template-rows: auto 1fr; min-height: 0; min-width: 0; }
+  .filters {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .chip {
+    font-size: 11px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--line); background: transparent; color: var(--dim); cursor: pointer;
+  }
+  .chip.on { color: var(--text); border-color: currentColor; }
+  .chip.hid1.on { color: #c792ea; } .chip.hid2.on { color: #4da3ff; }
+  .chip.hid3.on { color: #3ddc84; } .chip.hid4.on { color: #ffb020; }
+
+  #log {
+    margin: 0; padding: 10px 12px; overflow: auto;
+    font-family: var(--mono); font-size: 12px; line-height: 1.45;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .row { display: flex; gap: 8px; }
+  .tag {
+    flex: 0 0 auto; font-size: 10px; padding: 0 5px; border-radius: 3px;
+    background: var(--panel-2); color: var(--dim); height: 16px; line-height: 16px;
+  }
+  .tag.hid1 { color: #c792ea; } .tag.hid2 { color: #4da3ff; }
+  .tag.hid3 { color: #3ddc84; } .tag.hid4 { color: #ffb020; }
+  .tag.sys  { color: var(--err); }
+  .dirin { color: var(--dim); }
+  .msg { flex: 1; min-width: 0; }
+
+  footer {
+    padding: 6px 14px; border-top: 1px solid var(--line);
+    background: var(--panel); color: var(--dim); font-size: 11px;
+    display: flex; gap: 14px; align-items: center;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>OnlyKey Emulator</h1>
+  <div class="status"><span class="dot" id="dot"></span><span id="conn">connecting…</span></div>
+  <div class="spacer"></div>
+  <button id="btn-restart">Restart device</button>
+  <button id="btn-rebuild">Rebuild &amp; restart</button>
+  <button id="btn-reset" class="danger">Factory reset</button>
+</header>
+
+<main>
+  <section class="device">
+    <div>
+      <div class="label">NeoPixel</div>
+      <div class="leds"><div class="led" id="led0"></div><div class="led" id="led1"></div></div>
+    </div>
+    <div>
+      <div class="label">Buttons</div>
+      <div class="pad" id="pad"></div>
+      <p class="hint">Click = short press. Hold &gt;400 ms = long press.</p>
+    </div>
+  </section>
+
+  <section class="logpane">
+    <div class="filters">
+      <span class="label" style="margin-right:4px">Filter</span>
+      <button class="chip hid1 on" data-iface="0">HID1 keyboard</button>
+      <button class="chip hid2 on" data-iface="1">HID2 FIDO</button>
+      <button class="chip hid3 on" data-iface="2">HID3 vendor</button>
+      <button class="chip hid4 on" data-iface="3">HID4 debug</button>
+      <div class="spacer"></div>
+      <button id="btn-clear">Clear</button>
+      <label class="hint"><input type="checkbox" id="autoscroll" checked> follow</label>
+    </div>
+    <div id="log"></div>
+  </section>
+</main>
+
+<footer>
+  <span id="sock">socket: —</span><span id="uhid">uhid: —</span><span id="store">storage: —</span>
+</footer>
+
+<script>
+'use strict';
+
+/*
+ * The GUI is a pure IPC client with no authority over the emulator. The daemon
+ * is restarted by pm2 every time the firmware calls CPU_RESTART(), so this
+ * window must tolerate the socket vanishing and reappearing at any moment;
+ * state is re-requested on every attach rather than cached across one.
+ */
+const $ = (id) => document.getElementById(id);
+const logEl = $('log');
+
+/*
+ * Module resolution in an NW.js page context.
+ *
+ * Measured in NW.js 0.114: `__dirname` is undefined in an inline <script>, and
+ * window.location.href is a chrome-extension:// URL, so neither can locate a
+ * sibling directory. path.join(undefined, ...) throws and takes the whole
+ * script with it - which renders a window that looks fine but does nothing.
+ *
+ * process.cwd() IS correct (the app directory), so that is the fallback that
+ * actually works; the others are tried first in case a future runtime differs.
+ */
+function loadIpcClient() {
+  const tried = [];
+  const attempts = [
+    () => require('../emulator/lib/ipc-client'),
+    () => {
+      const path = require('path');
+      const dir = decodeURIComponent(new URL('.', window.location.href).pathname);
+      return require(path.join(dir, '..', 'emulator', 'lib', 'ipc-client'));
+    },
+    () => {
+      const path = require('path');
+      return require(path.join(process.cwd(), '..', 'emulator', 'lib', 'ipc-client'));
+    },
+  ];
+  for (const fn of attempts) {
+    try { return fn(); } catch (err) { tried.push(err.message); }
+  }
+  throw new Error('cannot load ipc-client:\n  ' + tried.join('\n  '));
+}
+
+const IFACE_TAG = { 0: 'HID1', 1: 'HID2', 2: 'HID3', 3: 'HID4' };
+const shown = new Set([0, 1, 2, 3]);
+const MAX_ROWS = 2000;   // keep the DOM bounded - the device is chatty
+
+function append(tagText, tagClass, text, dirIn) {
+  const row = document.createElement('div');
+  row.className = 'row';
+
+  const tag = document.createElement('span');
+  tag.className = 'tag ' + tagClass;
+  tag.textContent = tagText;
+
+  const msg = document.createElement('span');
+  msg.className = 'msg' + (dirIn ? ' dirin' : '');
+  msg.textContent = text;
+
+  row.append(tag, msg);
+  logEl.append(row);
+
+  while (logEl.childElementCount > MAX_ROWS) logEl.firstElementChild.remove();
+  if ($('autoscroll').checked) logEl.scrollTop = logEl.scrollHeight;
+}
+
+const sys = (text) => append('SYS', 'sys', text);
+
+/* A load failure used to blank the window silently; show it instead. */
+function fatal(err) {
+  $('conn').textContent = 'failed';
+  append('SYS', 'sys', String(err && err.stack || err));
+}
+window.addEventListener('error', (e) => fatal(e.error || e.message));
+window.addEventListener('unhandledrejection', (e) => fatal(e.reason));
+
+/*
+ * SEREMU output is a byte stream, not lines. Buffer until a newline so the log
+ * shows whole firmware messages instead of arbitrary fragments.
+ */
+let seremuPending = '';
+function appendSeremu(text) {
+  seremuPending += text;
+  const lines = seremuPending.split('\n');
+  seremuPending = lines.pop();
+  if (!shown.has(3)) return;
+  for (const line of lines) {
+    const clean = line.replace(/\r/g, '');
+    if (clean.trim()) append('HID4', 'hid4', clean);
+  }
+}
+
+const hex = (b64) =>
+  Buffer.from(b64, 'base64').toString('hex').replace(/(..)/g, '$1 ').trim();
+
+/* ---------- buttons ----------
+ * Hold duration decides which firmware action fires, so the GUI measures it
+ * and sends short or long - the same distinction the firmware draws between a
+ * newline and a space terminator on HID4.
+ */
+const LONG_MS = 400;
+const pad = $('pad');
+for (let n = 1; n <= 6; n++) {
+  const b = document.createElement('button');
+  b.textContent = n;
+  let downAt = 0;
+
+  const down = () => { downAt = Date.now(); b.classList.add('held'); };
+  const up = () => {
+    if (!downAt) return;
+    const held = Date.now() - downAt;
+    downAt = 0;
+    b.classList.remove('held');
+    const long = held >= LONG_MS;
+    client.press(n, { long });
+    sys(`button ${n} ${long ? 'long' : 'short'} press (${held} ms)`);
+  };
+
+  b.addEventListener('mousedown', down);
+  b.addEventListener('mouseup', up);
+  b.addEventListener('mouseleave', up);   // never strand a held button
+  pad.append(b);
+}
+
+/* ---------- connection ---------- */
+let IpcClient;
+try {
+  IpcClient = loadIpcClient();
+} catch (err) {
+  fatal(err);
+  throw err;
+}
+
+const client = new IpcClient();
+
+client.on('connect', () => {
+  $('dot').classList.add('on');
+  $('conn').textContent = 'connected';
+  client.getState();
+});
+
+client.on('disconnect', () => {
+  $('dot').classList.remove('on');
+  $('conn').textContent = 'reconnecting…';
+  sys('emulator went away (restart or stop) — retrying');
+});
+
+client.on('ready', (m) => {
+  $('sock').textContent = 'socket: ' + client.socketPath;
+  $('uhid').textContent = 'uhid: ' + (m.uhid ? 'active' : 'unavailable');
+  if (m.storageDir) $('store').textContent = 'storage: ' + m.storageDir;
+  sys('attached to emulator v' + m.version);
+});
+
+client.on('state', (m) => {
+  if (m.led) paintLeds(m.led);
+  $('uhid').textContent = 'uhid: ' + (m.uhid ? 'active' : 'unavailable');
+  if (m.storageDir) $('store').textContent = 'storage: ' + m.storageDir;
+});
+
+client.on('led', (m) => paintLeds(m.pixels));
+client.on('log', (m) => appendSeremu(m.text));
+client.on('restart', () => sys('firmware requested restart — pm2 is respawning'));
+client.on('error', (m) => sys('error: ' + (m.message || m)));
+
+client.on('keyboard', (m) => {
+  if (shown.has(0)) append('HID1', 'hid1', hex(m.data));
+});
+
+client.on('hid', (m) => {
+  if (!shown.has(m.iface)) return;
+  const arrow = m.dir === 'in' ? '<- ' : '-> ';
+  append(IFACE_TAG[m.iface], 'hid' + (m.iface + 1), arrow + hex(m.data), m.dir === 'in');
+});
+
+client.connect();
+
+/* ---------- LED ---------- */
+function paintLeds(pixels) {
+  (pixels || []).slice(0, 2).forEach((p, i) => {
+    const el = $('led' + i);
+    if (!el) return;
+    const c = `rgb(${p.r},${p.g},${p.b})`;
+    el.style.background = c;
+    el.style.boxShadow = (p.r + p.g + p.b) > 12 ? `0 0 18px ${c}, 0 0 34px ${c}` : 'none';
+  });
+}
+
+/* ---------- filters + actions ---------- */
+document.querySelectorAll('.chip[data-iface]').forEach((chip) => {
+  chip.addEventListener('click', () => {
+    const i = Number(chip.dataset.iface);
+    if (shown.has(i)) { shown.delete(i); chip.classList.remove('on'); }
+    else { shown.add(i); chip.classList.add('on'); }
+  });
+});
+
+$('btn-clear').addEventListener('click', () => { logEl.textContent = ''; });
+$('btn-restart').addEventListener('click', () => client.restartDevice());
+$('btn-rebuild').addEventListener('click', () => {
+  sys('rebuilding — the daemon stays up if the build fails');
+  client.rebuild();
+});
+$('btn-reset').addEventListener('click', () => {
+  if (confirm('Erase the emulated flash and EEPROM?\n\nThis wipes device keys, PINs and all slot data.')) {
+    client.factoryReset();
+    sys('factory reset requested');
+  }
+});
+</script>
+</body>
+</html>

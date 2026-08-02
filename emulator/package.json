@@ -1,0 +1,22 @@
+{
+  "name": "emulator",
+  "version": "1.0.0",
+  "description": "OnlyKey hardware emulator - runs the unmodified OnlyKey firmware as a Node native addon",
+  "main": "index.js",
+  "scripts": {
+    "stage": "node scripts/stage.js && node scripts/gen-sources.js",
+    "configure": "npm run stage && node-gyp configure",
+    "build": "npm run stage && node-gyp build",
+    "rebuild": "npm run stage && node-gyp configure && node-gyp build",
+    "smoke": "npm run build && node test/smoke.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "gypfile": true,
+  "dependencies": {
+    "node-addon-api": "^8.9.1",
+    "node-gyp": "^13.0.1"
+  }
+}

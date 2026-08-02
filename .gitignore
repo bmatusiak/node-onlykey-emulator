@@ -1,1 +1,32 @@
 node_modules
+
+# --- emulator build output -------------------------------------------------
+# .stage/ is the assembled compile tree: copies of the teensy3 core, OnlyKey's
+# libraries and the sketch, with our overrides and patches layered on top.
+# Regenerate with `npm run stage` in emulator/ - never edit it directly, edit
+# emulator/core-override/ or the PATCHES list in scripts/stage.js instead.
+emulator/.stage/
+
+# node-gyp output
+emulator/build/
+build/Release/
+build/Debug/
+*.node
+*.o
+*.a
+
+# generated file list (produced by scripts/gen-sources.js)
+emulator/sources.gypi
+
+# --- emulated device state -------------------------------------------------
+# Simulated flash / EEPROM images. These are the emulated OnlyKey's persistent
+# storage - device keys, PINs and slot data live here, so they are both
+# machine-specific and sensitive.
+*.onlykey-storage/
+.onlykey-storage/
+flash.bin
+eeprom.bin
+
+# --- misc ------------------------------------------------------------------
+npm-debug.log*
+.DS_Store
