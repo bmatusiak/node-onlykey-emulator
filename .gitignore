@@ -31,4 +31,4 @@ eeprom.bin
 npm-debug.log*
 .DS_Store
 
-/onlykey
+# /onlykey

@@ -97,8 +97,18 @@ class IpcPeer extends EventEmitter {
     if (this._closed) return;
     const wait = this._delay;
     this._delay = Math.min(this._delay * 2, this.maxRetryMs);
-    const t = setTimeout(() => this._open(), wait);
-    if (t.unref) t.unref();
+    /*
+     * Deliberately NOT unref()'d. This timer is the only thing keeping the
+     * daemon's event loop ticking once the GUI goes away - the firmware runs
+     * on its own native thread and does not hold a libuv handle. With it
+     * unref'd the loop had nothing referenced to service, retries silently
+     * stopped, and the emulator would never reattach to a GUI started later
+     * even though the process was still alive and running the firmware.
+     *
+     * Keeping it referenced is correct anyway: this is a supervised daemon
+     * that should stay up, not a script that should exit when idle.
+     */
+    setTimeout(() => this._open(), wait);
   }
 
   _onCommand(msg) {
