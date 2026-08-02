@@ -2,7 +2,7 @@ I want to build an emulator for OnlyKey, a hardware security key that provides s
 
 To build an emulator for OnlyKey, we will use the onlykey sourcecode and include in as a native nodejs module. This will allow us to run the OnlyKey code in a Node.js environment, enabling developers to interact with the emulator as if they were using the actual hardware device.
 
-We will also need to setup a hid emulator. A sample is found at `scripts/hid_setup.js`.
+We will also need to setup a hid emulator. A sample is found at `scripts/hid_setup.js`. The origianl device has 4 hid interfaces in debug mode, 3 in production mode. The emulator will simulate these interfaces, allowing developers to test their applications with the same HID communication as the physical device.
 
 We will focus on a minimal implementation of the OnlyKey emulator, loading the necessary OnlyKey code and providing a basic interface for developers to interact with. The emulator will support key functionalities such as generating keys, signing messages, and encrypting/decrypting data.
 
