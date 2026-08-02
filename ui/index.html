@@ -53,6 +53,14 @@
   .pad button { aspect-ratio: 1; font-size: 17px; font-weight: 600; border-radius: 10px; }
   .pad button.held { background: var(--accent); color: #06101c; border-color: var(--accent); }
   .hint { font-size: 11px; color: var(--dim); margin: 0; }
+  .hint code { font-family: var(--mono); color: var(--text); font-size: 10px; }
+  .sendbox { display: flex; gap: 6px; }
+  .sendbox input {
+    flex: 1; min-width: 0; font: 12px/1.4 var(--mono);
+    color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px;
+  }
+  .sendbox input:focus { outline: none; border-color: var(--accent); }
 
   .logpane { display: grid; grid-template-rows: auto 1fr; min-height: 0; min-width: 0; }
   .filters {
@@ -112,6 +120,21 @@
       <div class="label">Buttons</div>
       <div class="pad" id="pad"></div>
       <p class="hint">Click = short press. Hold &gt;400 ms = long press.</p>
+    </div>
+
+    <div>
+      <div class="label">Send to HID4 (debug)</div>
+      <div class="sendbox">
+        <input id="hid4-input" type="text" spellcheck="false" autocomplete="off"
+               placeholder="e.g. 2  or  8">
+        <button id="hid4-send">Send</button>
+      </div>
+      <p class="hint">
+        Enter sends it. A terminator is added if you omit one: newline = short
+        press, space = long press. Digits <code>1</code>-<code>6</code> are
+        buttons; <code>8</code> restarts; <code>0</code>/<code>9</code> then
+        <code>C</code> wipe.
+      </p>
     </div>
   </section>
 
@@ -362,6 +385,29 @@ $('btn-plug').addEventListener('click', () => {
   sys(want ? 'plugging in…' : 'unplugging…');
 });
 setPluggedUi(true);
+
+/*
+ * Raw send to HID4 (SEREMU). The firmware acts on a byte only when it sees a
+ * terminator - newline for a short press, space for a long one - so a bare
+ * "2" would sit in its buffer doing nothing. Append a newline when the text
+ * has no terminator of its own, and otherwise send exactly what was typed, so
+ * a deliberate trailing space still means "long press".
+ */
+const IFACE_SEREMU = 3;
+function sendHid4() {
+  const el = $('hid4-input');
+  const raw = el.value;
+  if (!raw) return;
+  const text = /[\n ]$/.test(raw) ? raw : raw + '\n';
+  client.writeHid(IFACE_SEREMU, Buffer.from(text, 'latin1'));
+  sys('HID4 <- ' + JSON.stringify(text));
+  el.value = '';
+  el.focus();
+}
+$('hid4-send').addEventListener('click', sendHid4);
+$('hid4-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); sendHid4(); }
+});
 
 $('btn-clear').addEventListener('click', () => {
   /*
