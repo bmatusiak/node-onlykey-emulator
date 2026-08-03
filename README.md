@@ -1,10 +1,12 @@
 node-onlykey-emulator
 =====================
 
-Runs the **unmodified** [OnlyKey firmware](onlykey/OnlyKey-Firmware) as a Node.js
-native addon, so you can develop and test against an OnlyKey without the
-hardware. The real Teensyduino core and OnlyKey's own libraries are compiled as
-they ship; only the parts that touch silicon are replaced.
+Runs the [OnlyKey firmware](onlykey/OnlyKey-Firmware) as a Node.js native addon,
+so you can develop and test against an OnlyKey without the hardware. It is built
+from the same sources the device is, with a **two-site** host adaptation behind
+`#ifdef OK_EMULATOR` — the device toolchain never defines it, so the firmware
+you flash is unaffected. The real Teensyduino core and OnlyKey's own libraries
+are compiled as they ship; only the parts that touch silicon are replaced.
 
 The emulator exposes the same four HID interfaces as a DEBUG-build device
 (three in production), a NeoPixel LED, six buttons, and file-backed flash and
@@ -318,7 +320,7 @@ resulting fault parks the firmware thread and raises a `restart` event.
 ### Running 32-bit firmware on a 64-bit host
 
 The firmware is correct on an ILP32 target and not always correct here. Two
-classes of divergence, both fixed by staged patches:
+classes of divergence, both now fixed in the OnlyKey sources themselves:
 
 **Pointer size.** Every flash field is read and written through
 `okcore_flashget/set_common`, which walk storage with `unsigned long *adr;
@@ -352,12 +354,36 @@ device→host reports must be queued and retried on `EAGAIN` rather than
 dropped — discarding them lost the debug output the test harness synchronises
 on.
 
-**The upstream sources under `onlykey/` are never modified.**
+**Where these fixes live.** They are in the OnlyKey sources, not in a patch
+script. Most are unconditional, because they were latent bugs on the MK20DX256
+too — falling off the end of a non-void function, returning a pointer to a dead
+stack frame, dereferencing a null `uint8_t *`. The device build gets those fixes
+as well, which is the point.
+
+Only **two** sites are genuinely emulator-specific and carry an
+`#ifdef OK_EMULATOR` gate, with the original preserved in the `#else`:
+
+| Site | Why it cannot be shared |
+| --- | --- |
+| `okcore.cpp` — `factorydefault()`'s DEBUG dump | Walks 64 KB from address 0. Valid flash on the target; unmapped here, so it starts at `0x1000`. |
+| `password.cpp` — `extern Profile_Offset` | The file declares it at two block scopes with two different types, which modern GCC rejects. Making them agree is required to compile; correcting them to match `okcore.cpp`'s `int` definition would change what the device reads back from a negative offset. |
+
+`OK_EMULATOR` is defined only by [`emulator/binding.gyp`](emulator/binding.gyp).
+Grep for it to audit the full divergence:
+
+```
+grep -rn OK_EMULATOR onlykey/
+```
+
+**Nothing under `onlykey/` is written to by the build.**
 [`emulator/scripts/stage.js`](emulator/scripts/stage.js) assembles a build tree
 by copying — the same thing OnlyKey's own `in-docker-build.sh` does — and layers
-`emulator/core-override/` on top. Every change is a documented textual patch in
-the `PATCHES` list in that file, each with its rationale. Regenerate with
-`npm run stage`; never edit `emulator/.stage/` directly.
+`emulator/core-override/` on top. One textual patch survives, against the
+vendored Teensy core's `kinetis.h`: it defines `__disable_irq()`/`__enable_irq()`
+as `CPSID i`/`CPSIE i` inline assembly, and a header's own `#define` always wins
+over anything predefined from outside, so there is no way to override it. That
+core is not OnlyKey code and should not carry emulator knowledge. Regenerate
+with `npm run stage`; never edit `emulator/.stage/` directly.
 
 ```
 emulator/

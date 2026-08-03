@@ -54,7 +54,12 @@
       "F_CPU=72000000",
       "ARDUINO=10605",
       "LAYOUT_US_ENGLISH",
-      "OKEMU=1"
+
+      # The firmware sources carry a handful of host-build adaptations behind
+      # #ifdef OK_EMULATOR. The device toolchain never defines it, so the ARM
+      # build compiles the #else branch and is unaffected. See README's
+      # "Running 32-bit firmware on a 64-bit host".
+      "OK_EMULATOR=1"
     ]
   },
 

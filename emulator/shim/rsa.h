@@ -15,6 +15,11 @@
  * directory on the include path; #include_next then resolves to the genuine
  * header. The mbedtls sources themselves are untouched and still compile
  * against their own declaration.
+ *
+ * This stays a shim rather than an OK_EMULATOR gate in okcrypto.cpp because the
+ * mismatch is a property of the vendored library's ABI on this host, not of the
+ * firmware's logic - and adding the overload costs the device build nothing,
+ * since it never sees this header.
  */
 #ifndef OKEMU_RSA_SHIM_H
 #define OKEMU_RSA_SHIM_H

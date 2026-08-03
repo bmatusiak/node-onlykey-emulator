@@ -12,6 +12,8 @@ The firmware code needs to be adapted slightly to stub out physical hardware per
 
 keep do not touch the original onlykey sourcecode, we will use it as is. The emulator will be a wrapper around the original code, providing the necessary stubs and interfaces to allow it to run in a Node.js environment.
 
+UPDATE: the original sources are still used as-is by the build - the emulator never rewrites them - but the firmware itself is now prepared for emulator use rather than adapted behind its back. Where a host build genuinely needs to differ, the OnlyKey source carries an `#ifdef OK_EMULATOR` with the original preserved in the `#else`; the define comes from `emulator/binding.gyp` and the device toolchain never sets it. There are two such sites, listed in README. Everything else that had to change was a real bug on the MK20DX256 too and is fixed unconditionally, so the device build benefits as well. The rule this replaces - a growing list of textual patches applied at staging time - was brittle: patches were literal string substitutions that silently stopped applying whenever upstream whitespace moved. `onlykey/onlykey-testing`, `python-onlykey` and `lib-agent` remain strictly off-limits; the emulator must satisfy them as they ship.
+
 simulated button press is handled on hid4 interface,  read onlykey sourcecode for details. The emulator will provide a way to simulate button presses through the GUI, allowing developers to test their applications without needing the physical device.
 
 location of the original onlykey sourcecode is `node-onlykey-emulator/onlykey`. The emulator will be built in `node-onlykey-emulator/emulator`. The emulator will be a Node.js module that can be imported and used in other Node.js applications.
