@@ -33,7 +33,7 @@ function defaultSocketPath() {
  *  hid      {iface, name, dir, data}      any HID traffic, both directions
  *  restart  {}                            firmware ran CPU_RESTART()
  * ---- client -> server ---------------------------------------------------
- *  press        {button, long}
+ *  press        {button, hold, ticks}     hold: tap|hold|long|longest
  *  setButton    {button, down}            raw analog pad
  *  writeHid     {iface, data}             base64
  *  factoryReset {}

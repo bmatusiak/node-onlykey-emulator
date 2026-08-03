@@ -33,14 +33,27 @@ const IFACE_NAME = {
 
 /*
  * The firmware's own debug button harness (okcore.cpp, touch_sense_loop):
- * an ASCII digit selects the button, then a terminator commits the press -
- * newline for a short press, space for a long one (key_press = 128).
+ * a line of ASCII digits selects the buttons, '!' per hold tier modifies the
+ * digit before it, and newline commits the line. The firmware replays the
+ * presses one per loop() iteration, so a whole sequence goes in one write.
  *
  * This - not the analog touch pads - is the supported way to drive buttons,
  * per EXPLAINER.md line 15. It only exists in DEBUG firmware builds.
  */
-const PRESS_SHORT = '\n';
-const PRESS_LONG = ' ';
+const PRESS_TERMINATOR = '\n';
+
+/*
+ * Hold tiers, and the firmware duration each maps to. The bands that matter in
+ * payload() (OnlyKey.ino): <=20 tap, >=72 hold actions, >=140 key labels,
+ * >=180 DUO config mode, >=360 DUO factory default - so 'hold' alone cannot
+ * reach everything a physical hold can.
+ */
+const HOLD_MODIFIER = {
+  tap: '',        // duration 1
+  hold: '!',      // 128 - what the legacy space terminator produced
+  long: '!!',     // 200
+  longest: '!!!', // 400
+};
 
 class OnlyKeyEmulator extends EventEmitter {
   constructor() {
@@ -93,25 +106,67 @@ class OnlyKeyEmulator extends EventEmitter {
    * Simulate a button press. n is 1..6.
    * @param {number}  n
    * @param {object}  [opts]
-   * @param {boolean} [opts.long] hold long enough to trigger the long-press action
+   * @param {string}  [opts.hold]  'tap' (default), 'hold', 'long' or 'longest'
+   * @param {number}  [opts.ticks] exact firmware duration, overrides opts.hold
    */
   pressButton(n, opts = {}) {
     if (!Number.isInteger(n) || n < 1 || n > 6) {
       throw new RangeError(`button must be 1..6, got ${n}`);
     }
-    const terminator = opts.long ? PRESS_LONG : PRESS_SHORT;
-    this.writeHid(Buffer.from(`${n}${terminator}`, 'latin1'), IFACE.SEREMU);
+    this.pressButtons([{ button: n, ...opts }]);
+  }
+
+  /**
+   * Simulate a sequence of presses in one write. The firmware paces the replay
+   * itself, so this is the reliable way to enter a PIN - no host-side delay
+   * between digits to get wrong.
+   * @param {Array<number|object>} presses button numbers, or pressButton() opts
+   *                                       objects carrying a `button` field
+   */
+  pressButtons(presses) {
+    // 16 is the firmware's queue depth (DBG_QUEUE_MAX); past that it drops the
+    // tail with a warning on the debug channel rather than pressing something
+    // the caller did not ask for.
+    if (presses.length > 16) {
+      throw new RangeError(`at most 16 presses per line, got ${presses.length}`);
+    }
+
+    const line = presses.map((p) => {
+      const { button, hold, ticks } = typeof p === 'object' ? p : { button: p };
+      if (!Number.isInteger(button) || button < 1 || button > 6) {
+        throw new RangeError(`button must be 1..6, got ${button}`);
+      }
+      if (ticks !== undefined) {
+        if (!Number.isInteger(ticks) || ticks < 1) {
+          throw new RangeError(`ticks must be a positive integer, got ${ticks}`);
+        }
+        return `${button}#${ticks}`;
+      }
+      const tier = hold || 'tap';
+      if (!(tier in HOLD_MODIFIER)) {
+        throw new RangeError(`hold must be one of ${Object.keys(HOLD_MODIFIER).join(', ')}, got ${tier}`);
+      }
+      return `${button}${HOLD_MODIFIER[tier]}`;
+    }).join('');
+
+    // And 32 is its raw line buffer (DBG_LINE_MAX, one SEREMU OUT report),
+    // which the modifiers can exhaust before the queue does - sixteen 'longest'
+    // holds is 64 bytes.
+    if (line.length > 32) {
+      throw new RangeError(`press line is ${line.length} bytes, firmware accepts 32: ${line}`);
+    }
+
+    this.writeHid(Buffer.from(`${line}${PRESS_TERMINATOR}`, 'latin1'), IFACE.SEREMU);
   }
 
   /*
-   * Debug-only firmware commands on the same channel. '0' and '9' each need a
-   * follow-up confirm() before anything is wiped - the firmware requires it so
-   * a stray keystroke cannot erase the device.
+   * Debug-only firmware command paths on the same channel. The wipes spell out
+   * their own confirmation ('0C'/'9C') so that no single stray byte can erase
+   * the device; there is no separate confirm step to follow them with.
    */
   restartDevice()  { this.writeHid(Buffer.from('8\n', 'latin1'), IFACE.SEREMU); }
-  wipeUserspace()  { this.writeHid(Buffer.from('0 ', 'latin1'), IFACE.SEREMU); }
-  wipeAll()        { this.writeHid(Buffer.from('9 ', 'latin1'), IFACE.SEREMU); }
-  confirmWipe()    { this.writeHid(Buffer.from('C ', 'latin1'), IFACE.SEREMU); }
+  wipeUserspace()  { this.writeHid(Buffer.from('0C\n', 'latin1'), IFACE.SEREMU); }
+  wipeAll()        { this.writeHid(Buffer.from('9C\n', 'latin1'), IFACE.SEREMU); }
 
   /** Host -> device on a writable interface (FIDO, vendor or SEREMU). */
   writeHid(buffer, iface = IFACE.FIDO) {
