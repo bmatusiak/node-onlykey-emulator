@@ -85,9 +85,8 @@ uint8_t keyboard_idle_count    = 0;
 volatile uint8_t keyboard_leds = 0;
 
 /*
- * Emits the current key state as a standard boot-protocol report, then - so a
- * viewer sees discrete keystrokes rather than a stuck key - the matching
- * release. The firmware calls send_now() once per keystroke.
+ * Emits the current key state as a standard boot-protocol report: modifier,
+ * reserved, then the six-key rollover array.
  */
 int usb_keyboard_send(void) {
   uint8_t report[8];
@@ -96,6 +95,97 @@ int usb_keyboard_send(void) {
   memcpy(report + 2, keyboard_keys, 6);
   okemu_kbd_emit(report);
   return 0;
+}
+
+/*
+ * Code point -> keycode, and keycode -> (key, modifier).
+ *
+ * These mirror usb_keyboard.c's own static helpers, which the emulator cannot
+ * call because this file replaces that translation unit wholesale. The lookup
+ * tables are the real ones: OnlyKey ships its own keylayouts.c (shadowing the
+ * stock core's) which fills keycodes_ascii[] in update_keyboard_layout() from
+ * the layout byte in EEPROM, defaulting to US English when it is unset.
+ *
+ * This used to be a pass-through that put the raw code point in the keycode
+ * byte, on the reasoning that the only consumer was a human-readable log. That
+ * stopped being true once the emulator started presenting a USB gadget: the
+ * host binds it as a real keyboard and reads these bytes as HID usage codes, so
+ * an untranslated 'B' (0x42) arrived as usage 66 = F9. Every typed feature -
+ * backup, and any slot that types a credential - produced function-key junk in
+ * the focused window. The masks are runtime variables here rather than the
+ * stock core's #defines, so they are tested with `if` rather than `#ifdef`.
+ */
+/*
+ * OnlyKey's keylayouts.c defines these as runtime variables (the stock core has
+ * them as per-layout #defines) but its keylayouts.h never declares them, so the
+ * externs have to live here. Plain `extern` is correct across the C/C++ line:
+ * namespace-scope variables are not name-mangled, only functions are.
+ */
+extern uint16_t SHIFT_MASK;
+extern uint16_t ALTGR_MASK;
+extern uint16_t RCTRL_MASK;
+extern uint16_t KEY_NON_US_100;
+
+static uint16_t okemu_unicode_to_keycode(uint16_t cpoint) {
+  if (cpoint < 32) {
+    if (cpoint == 10) return KEY_ENTER & 0x3FFF;
+    if (cpoint == 11) return KEY_TAB & 0x3FFF;
+    return 0;
+  }
+  if (cpoint < 128) return keycodes_ascii[cpoint - 0x20];
+  if (cpoint >= 0xA0 && cpoint < 0x100) return keycodes_iso_8859_1[cpoint - 0xA0];
+  return 0;
+}
+
+static uint8_t okemu_keycode_to_modifier(uint16_t keycode) {
+  uint8_t modifier = 0;
+  if (SHIFT_MASK && (keycode & SHIFT_MASK)) modifier |= (uint8_t)MODIFIERKEY_SHIFT;
+  if (ALTGR_MASK && (keycode & ALTGR_MASK)) modifier |= (uint8_t)MODIFIERKEY_RIGHT_ALT;
+  if (RCTRL_MASK && (keycode & RCTRL_MASK)) modifier |= (uint8_t)MODIFIERKEY_RIGHT_CTRL;
+  return modifier;
+}
+
+static uint8_t okemu_keycode_to_key(uint16_t keycode) {
+  uint8_t key = keycode & 0x3F;
+  if (KEY_NON_US_100 && key == KEY_NON_US_100) key = 100;
+  return key;
+}
+
+static void okemu_press_key(uint8_t key, uint8_t modifier) {
+  int i, send_required = 0;
+  if (modifier && (keyboard_modifier_keys & modifier) != modifier) {
+    keyboard_modifier_keys |= modifier;
+    send_required = 1;
+  }
+  if (key) {
+    for (i = 0; i < 6; i++) if (keyboard_keys[i] == key) goto end;
+    for (i = 0; i < 6; i++) {
+      if (keyboard_keys[i] == 0) {
+        keyboard_keys[i] = key;
+        send_required = 1;
+        goto end;
+      }
+    }
+  }
+end:
+  if (send_required) usb_keyboard_send();
+}
+
+static void okemu_release_key(uint8_t key, uint8_t modifier) {
+  int i, send_required = 0;
+  if (modifier && (keyboard_modifier_keys & modifier) != 0) {
+    keyboard_modifier_keys &= ~modifier;
+    send_required = 1;
+  }
+  if (key) {
+    for (i = 0; i < 6; i++) {
+      if (keyboard_keys[i] == key) {
+        keyboard_keys[i] = 0;
+        send_required = 1;
+      }
+    }
+  }
+  if (send_required) usb_keyboard_send();
 }
 
 int usb_keyboard_press(uint8_t key, uint8_t modifier) {
@@ -109,39 +199,59 @@ int usb_keyboard_press(uint8_t key, uint8_t modifier) {
 }
 
 void usb_keyboard_press_keycode(uint16_t n) {
-  keyboard_keys[0] = (uint8_t)n;
-  usb_keyboard_send();
+  uint8_t msb = n >> 8;
+  if (msb >= 0xC2 && msb <= 0xDF) {
+    n = (n & 0x3F) | ((uint16_t)(msb & 0x1F) << 6);
+  } else if (msb == 0x80) {
+    okemu_press_key(0, (uint8_t)n);
+    return;
+  } else if (msb == 0x40) {
+    okemu_press_key((uint8_t)n, 0);
+    return;
+  }
+  uint16_t keycode = okemu_unicode_to_keycode(n);
+  if (!keycode) return;
+  okemu_press_key(okemu_keycode_to_key(keycode), okemu_keycode_to_modifier(keycode));
 }
 
 void usb_keyboard_release_keycode(uint16_t n) {
-  (void)n;
-  keyboard_keys[0] = 0;
-  usb_keyboard_send();
+  uint8_t msb = n >> 8;
+  if (msb >= 0xC2 && msb <= 0xDF) {
+    n = (n & 0x3F) | ((uint16_t)(msb & 0x1F) << 6);
+  } else if (msb == 0x80) {
+    okemu_release_key(0, (uint8_t)n);
+    return;
+  } else if (msb == 0x40) {
+    okemu_release_key((uint8_t)n, 0);
+    return;
+  }
+  uint16_t keycode = okemu_unicode_to_keycode(n);
+  if (!keycode) return;
+  okemu_release_key(okemu_keycode_to_key(keycode), okemu_keycode_to_modifier(keycode));
 }
 
 void usb_keyboard_release_all(void) {
+  uint8_t i, anybits;
+  anybits = keyboard_modifier_keys;
   keyboard_modifier_keys = 0;
+  anybits |= keyboard_media_keys;
   keyboard_media_keys = 0;
-  memset(keyboard_keys, 0, sizeof keyboard_keys);
-  usb_keyboard_send();
+  for (i = 0; i < 6; i++) {
+    anybits |= keyboard_keys[i];
+    keyboard_keys[i] = 0;
+  }
+  if (anybits) usb_keyboard_send();
 }
 
 void usb_keyboard_write(uint8_t c) {
   usb_keyboard_write_unicode(c);
 }
 
-/*
- * The real core maps a code point through keylayouts.h to keycode+modifier.
- * The emulator's consumer is a human-readable log and the UHID keyboard
- * interface, so pass the character through as an ASCII payload and let the JS
- * side render it; a full layout reverse-map would add no fidelity here.
- */
+/* One code point typed as a discrete press/release pair, as write_key() does. */
 void usb_keyboard_write_unicode(uint16_t cpoint) {
-  uint8_t report[8] = { 0 };
-  report[1] = 0xFF;                 /* marker: literal character, not a keycode */
-  report[2] = (uint8_t)cpoint;
-  report[3] = (uint8_t)(cpoint >> 8);
-  okemu_kbd_emit(report);
+  uint16_t keycode = okemu_unicode_to_keycode(cpoint);
+  if (!keycode) return;
+  usb_keyboard_press(okemu_keycode_to_key(keycode), okemu_keycode_to_modifier(keycode));
 }
 
 /* ------------------------------- keyboard SET_REPORT / GET_REPORT --------
