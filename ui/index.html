@@ -55,6 +55,9 @@
   .hint { font-size: 11px; color: var(--dim); margin: 0; }
   .hint code { font-family: var(--mono); color: var(--text); font-size: 10px; }
   .sendbox { display: flex; gap: 6px; }
+  .sendbox input[type=number] { width: 56px; flex: none; text-align: center; }
+  #btn-backup { flex: 1; }
+  #btn-backup.armed { border-color: var(--accent); color: var(--accent); }
   .sendbox input {
     flex: 1; min-width: 0; font: 12px/1.4 var(--mono);
     color: var(--text); background: var(--panel-2);
@@ -62,7 +65,27 @@
   }
   .sendbox input:focus { outline: none; border-color: var(--accent); }
 
-  .logpane { display: grid; grid-template-rows: auto 1fr; min-height: 0; min-width: 0; }
+  .logpane { display: grid; grid-template-rows: auto auto 1fr; min-height: 0; min-width: 0; }
+  #typed-pane { border-bottom: 1px solid var(--line); padding: 8px 12px; display: grid; gap: 6px; }
+  #typed-pane[hidden] { display: none; }
+  .typed-bar { display: flex; align-items: center; gap: 8px; }
+  .typed-split { display: grid; grid-template-columns: 1fr 260px; gap: 8px; min-width: 0; }
+  #typed {
+    width: 100%; height: 170px; resize: vertical; box-sizing: border-box;
+    font: 12px/1.5 var(--mono); color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px;
+  }
+  #typed:focus { outline: none; border-color: var(--accent); }
+  #typed-events {
+    height: 170px; overflow-y: auto; min-width: 0;
+    font: 11px/1.5 var(--mono); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px;
+  }
+  #typed-events .ev { display: flex; gap: 8px; white-space: pre; }
+  #typed-events .t { color: var(--dim); flex: none; }
+  #typed-events .k { color: var(--accent); }
+  #typed-events .up { color: var(--dim); }
+  #btn-typed.on { border-color: var(--accent); color: var(--accent); }
   .filters {
     display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
     padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
@@ -119,21 +142,38 @@
     <div>
       <div class="label">Buttons</div>
       <div class="pad" id="pad"></div>
-      <p class="hint">Click = short press. Hold &gt;400 ms = long press.</p>
+      <p class="hint">Click = tap. Hold &gt;400 ms, &gt;2 s or &gt;5 s for the three
+        hold tiers.</p>
+    </div>
+
+    <div>
+      <div class="label">Backup</div>
+      <div class="sendbox">
+        <button id="btn-backup">Start backup</button>
+        <input id="backup-delay" type="number" min="1" max="60" value="5" title="seconds before the press is sent">
+      </div>
+      <p class="hint" id="backup-hint">
+        Holds button <code>1</code> (<code>1!</code>), which makes the device
+        <em>type</em> the backup on HID1 — into whatever window has focus. The
+        countdown is your window to click into an editor. Needs the device
+        unlocked.
+      </p>
     </div>
 
     <div>
       <div class="label">Send to HID4 (debug)</div>
       <div class="sendbox">
         <input id="hid4-input" type="text" spellcheck="false" autocomplete="off"
-               placeholder="e.g. 2  or  8">
+               placeholder="e.g. 1234567  or  6!!  or  8">
         <button id="hid4-send">Send</button>
       </div>
       <p class="hint">
-        Enter sends it. A terminator is added if you omit one: newline = short
-        press, space = long press. Digits <code>1</code>-<code>6</code> are
-        buttons; <code>8</code> restarts; <code>0</code>/<code>9</code> then
-        <code>C</code> wipe.
+        Enter sends it, and a newline is added if you omit one. Digits
+        <code>1</code>-<code>6</code> are buttons and run in order, so
+        <code>1234567</code> types a PIN; add <code>!</code>, <code>!!</code> or
+        <code>!!!</code> for the three hold tiers, or <code>#</code>
+        <em>ticks</em> for an exact duration. <code>8</code> restarts;
+        <code>0C</code> wipes userspace and <code>9C</code> wipes everything.
       </p>
     </div>
   </section>
@@ -146,8 +186,25 @@
       <button class="chip hid3 on" data-iface="2">HID3 vendor</button>
       <button class="chip hid4 on" data-iface="3">HID4 debug</button>
       <div class="spacer"></div>
+      <button id="btn-typed">Typed output</button>
       <button id="btn-clear">Clear</button>
       <label class="hint"><input type="checkbox" id="autoscroll" checked> follow</label>
+    </div>
+    <div id="typed-pane" hidden>
+      <div class="typed-bar">
+        <span class="label">Keystrokes</span>
+        <span class="hint" id="typed-stat">0 keys</span>
+        <div class="spacer"></div>
+        <label class="hint"><input type="checkbox" id="typed-releases"> show releases</label>
+        <button id="btn-typed-copy">Copy text</button>
+        <button id="btn-typed-save">Save…</button>
+        <button id="btn-typed-clear">Clear</button>
+      </div>
+      <div class="typed-split">
+        <textarea id="typed" spellcheck="false" readonly
+                  placeholder="What a real editor would have received. Decoded from the keyboard reports themselves, so it works even when the OS has nowhere to route them."></textarea>
+        <div id="typed-events"></div>
+      </div>
     </div>
     <div id="log"></div>
   </section>
@@ -288,11 +345,17 @@ const hex = (b64) =>
   Buffer.from(b64, 'base64').toString('hex').replace(/(..)/g, '$1 ').trim();
 
 /* ---------- buttons ----------
- * Hold duration decides which firmware action fires, so the GUI measures it
- * and sends short or long - the same distinction the firmware draws between a
- * newline and a space terminator on HID4.
+ * Hold duration decides which firmware action fires, so the GUI measures it and
+ * picks a tier. The wall-clock thresholds mirror the firmware's own duration
+ * bands (payload(), OnlyKey.ino): a plain hold reaches the >=72 actions, and
+ * the two deeper tiers reach the >=180 and >=360 ones a plain hold cannot.
  */
-const LONG_MS = 400;
+const HOLD_TIERS = [
+  { ms: 5000, hold: 'longest' },
+  { ms: 2000, hold: 'long' },
+  { ms: 400,  hold: 'hold' },
+  { ms: 0,    hold: 'tap' },
+];
 const pad = $('pad');
 for (let n = 1; n <= 6; n++) {
   const b = document.createElement('button');
@@ -305,9 +368,9 @@ for (let n = 1; n <= 6; n++) {
     const held = Date.now() - downAt;
     downAt = 0;
     b.classList.remove('held');
-    const long = held >= LONG_MS;
-    client.press(n, { long });
-    sys(`button ${n} ${long ? 'long' : 'short'} press (${held} ms)`);
+    const { hold } = HOLD_TIERS.find((t) => held >= t.ms);
+    client.press(n, { hold });
+    sys(`button ${n} ${hold} press (${held} ms)`);
   };
 
   b.addEventListener('mousedown', down);
@@ -315,6 +378,271 @@ for (let n = 1; n <= 6; n++) {
   b.addEventListener('mouseleave', up);   // never strand a held button
   pad.append(b);
 }
+
+/* ---------- backup ----------
+ * Backup is an ordinary hold of button 1, but it is the one action whose output
+ * lands outside this window: okcore.cpp's backup() types the whole thing with
+ * Keyboard.press(), so it goes to the OS's focused window, not the debug log.
+ * Hence the countdown - it exists purely to give you time to click into an
+ * editor before the device starts typing.
+ *
+ * The tier matters. OnlyKey.ino gates backup on `duration < 180 && duration >=
+ * 72`, so 'hold' (128) lands in the window and the deeper tiers overshoot it
+ * and do nothing at all on non-DUO hardware.
+ */
+const BACKUP_HOLD = 'hold';
+const btnBackup = $('btn-backup');
+const backupDelay = $('backup-delay');
+let backupTimer = null;
+
+function stopBackupCountdown(msg) {
+  if (backupTimer) { clearInterval(backupTimer); backupTimer = null; }
+  btnBackup.classList.remove('armed');
+  btnBackup.textContent = 'Start backup';
+  backupDelay.disabled = false;
+  if (msg) sys(msg);
+}
+
+btnBackup.addEventListener('click', () => {
+  if (backupTimer) {              // second click while counting = cancel
+    stopBackupCountdown('backup cancelled');
+    return;
+  }
+  let left = Math.min(60, Math.max(1, parseInt(backupDelay.value, 10) || 5));
+  backupDelay.disabled = true;
+  btnBackup.classList.add('armed');
+  btnBackup.textContent = `Sending in ${left}s — cancel`;
+  sys(`backup armed: focus an editor, sending button 1 hold in ${left}s`);
+
+  backupTimer = setInterval(() => {
+    left -= 1;
+    if (left > 0) {
+      btnBackup.textContent = `Sending in ${left}s — cancel`;
+      return;
+    }
+    stopBackupCountdown();
+    client.press(1, { hold: BACKUP_HOLD });
+    sys('backup: button 1 hold sent - the device is typing into the focused window');
+  }, 1000);
+});
+
+/* ---------- typed output ----------
+ * Decodes HID1 boot-keyboard reports back into text.
+ *
+ * The device types by emitting real HID usage codes, which the OS turns into
+ * keystrokes for the focused window. That only helps when something is actually
+ * listening: under a virtual display (Xvfb/Xpra, VNC) the session's input comes
+ * from the remote client via XTEST and nothing reads the emulated keyboard's
+ * evdev node at all, so the keystrokes are correct and simply have no consumer.
+ * Decoding here reads the reports at the source, so backup and any slot that
+ * types a credential stay visible regardless of how the OS routes input.
+ */
+const HID_PUNCT = {
+  0x2c: [' ', ' '],
+  0x2d: ['-', '_'], 0x2e: ['=', '+'], 0x2f: ['[', '{'], 0x30: [']', '}'],
+  0x31: ['\\', '|'], 0x32: ['#', '~'], 0x33: [';', ':'], 0x34: ["'", '"'],
+  0x35: ['`', '~'], 0x36: [',', '<'], 0x37: ['.', '>'], 0x38: ['/', '?'],
+  0x64: ['\\', '|'],                                  // ISO key next to LShift
+};
+const DIGITS = '1234567890';
+const DIGITS_SHIFTED = '!@#$%^&*()';
+
+/*
+ * Non-printing usages. These carry no character but are the interesting half of
+ * a keystroke log - a slot that tabs between fields and hits enter looks like an
+ * empty capture without them.
+ */
+const HID_NAMED = {
+  0x28: 'Enter', 0x29: 'Esc', 0x2a: 'Backspace', 0x2b: 'Tab',
+  0x39: 'CapsLock', 0x46: 'PrintScreen', 0x47: 'ScrollLock', 0x48: 'Pause',
+  0x49: 'Insert', 0x4a: 'Home', 0x4b: 'PageUp', 0x4c: 'Delete', 0x4d: 'End',
+  0x4e: 'PageDown', 0x4f: 'Right', 0x50: 'Left', 0x51: 'Down', 0x52: 'Up',
+  0x53: 'NumLock', 0x65: 'Menu',
+};
+for (let i = 0; i < 12; i++) HID_NAMED[0x3a + i] = 'F' + (i + 1);
+
+const MODIFIER_NAMES = [
+  [0x01, 'Ctrl'], [0x02, 'Shift'], [0x04, 'Alt'], [0x08, 'Meta'],
+  [0x10, 'RCtrl'], [0x20, 'RShift'], [0x40, 'RAlt'], [0x80, 'RMeta'],
+];
+
+const KEY_BACKSPACE = 0x2a;
+const KEY_ENTER = 0x28;
+const KEY_TAB = 0x2b;
+
+function hidKeyToChar(code, shift) {
+  if (code >= 0x04 && code <= 0x1d) {                 // a-z
+    const c = String.fromCharCode(0x61 + code - 0x04);
+    return shift ? c.toUpperCase() : c;
+  }
+  if (code >= 0x1e && code <= 0x27) {                 // 1-9, 0
+    const i = code - 0x1e;
+    return shift ? DIGITS_SHIFTED[i] : DIGITS[i];
+  }
+  if (code === KEY_ENTER) return '\n';
+  if (code === KEY_TAB) return '\t';
+  const pair = HID_PUNCT[code];
+  return pair ? pair[shift ? 1 : 0] : '';
+}
+
+// Human label for one key press: "Shift+B", "Enter", or the bare character.
+function hidKeyLabel(code, modifiers) {
+  const held = MODIFIER_NAMES.filter(([bit]) => modifiers & bit).map(([, n]) => n);
+  const shift = (modifiers & 0x22) !== 0;
+  let base = HID_NAMED[code];
+  if (!base) {
+    const ch = hidKeyToChar(code, shift);
+    base = ch === ' ' ? 'Space' : (ch || `0x${code.toString(16).padStart(2, '0')}`);
+  }
+  // Shift is already reflected in the character itself, so naming it too reads
+  // as "Shift+B" for 'B' - keep it only when it did not change the character.
+  const mods = held.filter((n) => !(shift && (n === 'Shift' || n === 'RShift') && base.length === 1 && base !== base.toLowerCase()));
+  return mods.length ? `${mods.join('+')}+${base}` : base;
+}
+
+let typedText = '';
+let typedPrevKeys = new Set();
+let typedKeyCount = 0;
+let typedLastAt = 0;
+const TYPED_EVENT_LIMIT = 500;
+
+/*
+ * Batched exactly like the main log, and for the same reason: a backup types
+ * ~140 keys while the debug channel is emitting thousands of lines, and both
+ * scrollHeight and a textarea value assignment force a synchronous layout of
+ * the whole document - log rows included. Doing that per keystroke locked the
+ * window up. One insert, one trim, one value assignment and one scroll per
+ * frame instead, however many keys arrived in it.
+ */
+let typedPendingRows = [];
+let typedTextDirty = false;
+let typedFlushScheduled = false;
+
+function scheduleTypedFlush() {
+  if (typedFlushScheduled) return;
+  typedFlushScheduled = true;
+  requestAnimationFrame(flushTyped);
+}
+
+function flushTyped() {
+  typedFlushScheduled = false;
+  const box = $('typed-events');
+
+  if (typedPendingRows.length) {
+    const rows = typedPendingRows.length > TYPED_EVENT_LIMIT
+      ? typedPendingRows.slice(-TYPED_EVENT_LIMIT) : typedPendingRows;
+    typedPendingRows = [];
+    const frag = document.createDocumentFragment();
+    for (const r of rows) frag.append(r);
+    box.append(frag);
+    while (box.childElementCount > TYPED_EVENT_LIMIT) box.firstElementChild.remove();
+  }
+
+  if (typedTextDirty) {
+    typedTextDirty = false;
+    $('typed').value = typedText;
+    $('typed-stat').textContent = `${typedKeyCount} keys, ${typedText.length} chars`;
+  }
+
+  // Only read scrollHeight once per frame, and not at all while hidden - the
+  // pane has no layout to scroll then, and the read would still cost a reflow.
+  if (!$('typed-pane').hidden && $('autoscroll').checked) {
+    box.scrollTop = box.scrollHeight;
+    const el = $('typed');
+    el.scrollTop = el.scrollHeight;
+  }
+}
+
+function typedEvent(label, cls, deltaMs) {
+  const row = document.createElement('div');
+  row.className = 'ev';
+  const t = document.createElement('span');
+  t.className = 't';
+  t.textContent = (deltaMs === null ? '     —' : `+${String(Math.min(deltaMs, 99999)).padStart(5)}`);
+  const k = document.createElement('span');
+  k.className = cls;
+  k.textContent = label;
+  row.append(t, k);
+  typedPendingRows.push(row);
+  scheduleTypedFlush();
+}
+
+function decodeTyped(report) {
+  if (!report || report.length < 8) return;
+  const modifiers = report[0];
+  const shift = (modifiers & 0x22) !== 0;             // either shift modifier
+  const now = new Set();
+  for (let i = 2; i < 8; i++) if (report[i]) now.add(report[i]);
+
+  const at = Date.now();
+  const delta = typedLastAt ? at - typedLastAt : null;
+
+  // Only keys that were not down in the previous report are new presses - a
+  // held key repeats across reports and must not be counted twice.
+  let changed = false;
+  now.forEach((code) => {
+    if (typedPrevKeys.has(code)) return;
+    if (code === KEY_BACKSPACE) typedText = typedText.slice(0, -1);
+    else typedText += hidKeyToChar(code, shift);
+    typedKeyCount++;
+    typedEvent(hidKeyLabel(code, modifiers), 'k', delta);
+    typedLastAt = at;
+    changed = true;
+  });
+
+  if ($('typed-releases').checked) {
+    typedPrevKeys.forEach((code) => {
+      if (!now.has(code)) typedEvent(`${hidKeyLabel(code, 0)} up`, 'up', delta);
+    });
+  }
+
+  typedPrevKeys = now;
+  if (!changed) return;
+
+  typedTextDirty = true;
+  scheduleTypedFlush();
+}
+
+$('btn-typed').addEventListener('click', () => {
+  const pane = $('typed-pane');
+  pane.hidden = !pane.hidden;
+  $('btn-typed').classList.toggle('on', !pane.hidden);
+});
+$('btn-typed-clear').addEventListener('click', () => {
+  typedText = '';
+  typedKeyCount = 0;
+  typedLastAt = 0;
+  typedPrevKeys = new Set();
+  typedPendingRows = [];      // else a queued flush repopulates the log
+  typedTextDirty = false;
+  $('typed').value = '';
+  $('typed-events').textContent = '';
+  $('typed-stat').textContent = '0 keys';
+});
+$('btn-typed-save').addEventListener('click', () => {
+  // nwjs turns a file input with `nwsaveas` into a native save dialog.
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.setAttribute('nwsaveas', 'onlykey-typed.txt');
+  picker.addEventListener('change', () => {
+    if (!picker.value) return;
+    try {
+      require('fs').writeFileSync(picker.value, typedText, 'utf8');
+      sys(`saved ${typedText.length} typed characters to ${picker.value}`);
+    } catch (err) {
+      sys('save failed: ' + err.message);
+    }
+  });
+  picker.click();
+});
+$('btn-typed-copy').addEventListener('click', () => {
+  const el = $('typed');
+  el.removeAttribute('readonly');
+  el.select();
+  document.execCommand('copy');
+  el.setAttribute('readonly', '');
+  sys(`copied ${typedText.length} typed characters to the clipboard`);
+});
 
 /* ---------- connection ---------- */
 let IpcHost;
@@ -345,6 +673,9 @@ client.on('device-disconnect', () => {
   $('dot').classList.remove('on');
   $('conn').textContent = 'waiting for device…';
   sys('emulator detached (reboot or stop) — waiting for it to dial back in');
+  // A countdown that fires into a detached device would send the press nowhere
+  // and leave the button stuck mid-count.
+  if (backupTimer) stopBackupCountdown('backup cancelled — device detached');
 });
 
 client.on('plugged', (m) => setPluggedUi(m.plugged));
@@ -371,8 +702,14 @@ client.on('log', (m) => appendSeremu(m.text));
 client.on('restart', () => sys('firmware requested restart — pm2 is respawning'));
 client.on('error', (m) => sys('error: ' + (m.message || m)));
 
+// Keyboard reports arrive on their own message rather than as a hid frame (see
+// ipc-peer), so the direction prefix has to be added here to match the other
+// interfaces. This one is always device -> host; the host's inbound LED reports
+// do come through as ordinary hid frames.
 client.on('keyboard', (m) => {
-  if (shown.has(0)) append('HID1', 'hid1', hex(m.data));
+  const data = Buffer.from(m.data, 'base64');
+  decodeTyped(data);
+  if (shown.has(0)) append('HID1', 'hid1', '-> ' + hex(m.data));
 });
 
 client.on('hid', (m) => {
@@ -456,18 +793,16 @@ $('btn-plug').addEventListener('click', async () => {
 setPluggedUi(true);
 
 /*
- * Raw send to HID4 (SEREMU). The firmware acts on a byte only when it sees a
- * terminator - newline for a short press, space for a long one - so a bare
- * "2" would sit in its buffer doing nothing. Append a newline when the text
- * has no terminator of its own, and otherwise send exactly what was typed, so
- * a deliberate trailing space still means "long press".
+ * Raw send to HID4 (SEREMU). The firmware acts on a line only when it sees a
+ * terminator, so a bare "2" would sit in its buffer doing nothing. Append a
+ * newline when the text has no terminator of its own.
  */
 const IFACE_SEREMU = 3;
 function sendHid4() {
   const el = $('hid4-input');
   const raw = el.value;
   if (!raw) return;
-  const text = /[\n ]$/.test(raw) ? raw : raw + '\n';
+  const text = raw.endsWith('\n') ? raw : raw + '\n';
   client.writeHid(IFACE_SEREMU, Buffer.from(text, 'latin1'));
   sys('HID4 <- ' + JSON.stringify(text));
   el.value = '';
