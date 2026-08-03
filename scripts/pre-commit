@@ -1,0 +1,27 @@
+#!/bin/sh
+#
+# onlykey/ must never land in this repo.
+#
+# It holds four nested git repos (libraries, OnlyKey-Firmware, onlykey-testing,
+# python-onlykey), the generated okpqc-venv, and the vendored Arduino/Teensy
+# toolchain. It is deliberately NOT in .gitignore: ignoring it hides it from
+# editor and agent search, which is worse than the commit risk. This hook is
+# what makes leaving it unignored safe - a stray `git add .` fails here instead
+# of committing a few hundred megabytes of vendored tree.
+#
+# Local only (.git/hooks is not tracked). Reinstall with:
+#   cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+
+staged=$(git diff --cached --name-only | grep '^onlykey/')
+
+if [ -n "$staged" ]; then
+  echo "pre-commit: refusing to commit paths under onlykey/" >&2
+  echo >&2
+  echo "$staged" | sed 's/^/  /' >&2
+  echo >&2
+  echo "onlykey/ is a set of separate repos and vendored tooling - commit there instead." >&2
+  echo "Unstage with:  git restore --staged onlykey/" >&2
+  exit 1
+fi
+
+exit 0
