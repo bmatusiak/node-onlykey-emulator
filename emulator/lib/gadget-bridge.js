@@ -242,14 +242,32 @@ class GadgetBridge {
     return this;
   }
 
+  /*
+   * Losing the udev race here used to be fatal for the whole process: one
+   * EACCES threw, the bridge reported unavailable, and nothing ever retried -
+   * the emulator ran on with no HID at all. Retry instead, re-waiting between
+   * attempts, so a slow udev costs a few hundred milliseconds rather than the
+   * device.
+   */
   _openDevices() {
-    for (const spec of INTERFACES) {
-      const dev = new GadgetDevice(spec, (data) => {
-        if (!spec.writable) return;   /* keyboard OUT is just LED state */
-        this.emu.writeHid(data, spec.iface);
-      });
-      dev.start();
-      this.devices.set(spec.iface, dev);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        for (const spec of INTERFACES) {
+          const dev = new GadgetDevice(spec, (data) => {
+            if (!spec.writable) return;   /* keyboard OUT is just LED state */
+            this.emu.writeHid(data, spec.iface);
+          });
+          dev.start();
+          this.devices.set(spec.iface, dev);
+        }
+        return;
+      } catch (err) {
+        /* Partially-opened set: drop it so the retry starts clean. */
+        for (const dev of this.devices.values()) dev.destroy();
+        this.devices.clear();
+        if (attempt >= 3 || !/EACCES|ENOENT|EPERM/.test(err.message)) throw err;
+        this._waitForEndpoints(5000);
+      }
     }
   }
 
@@ -262,12 +280,28 @@ class GadgetBridge {
    * answering again (unbind, pm2 respawn, node + addon load, firmware setup,
    * rebind). An earlier 3s cap expired first, _openDevices() threw, the bridge
    * reported unavailable, and the device never came back at all.
+   *
+   * Waiting for existence is NOT enough, and getting that wrong cost a long
+   * time: unbinding deletes /dev/hidg*, and on rebind the kernel recreates them
+   * root:root 0600 - udev applies 71-onlykey-gadget.rules a few milliseconds
+   * LATER. existsSync() goes true the instant the node appears, so we opened
+   * inside that window, got EACCES, and the bridge declared itself unavailable
+   * for the rest of the process's life. The device then enumerated perfectly
+   * (all four interfaces, correct descriptors) while nothing on the emulator
+   * side was reading /dev/hidg*, so every host write timed out - which surfaced
+   * as "Could not open OnlyKey SEREMU" and looked like a device fault.
+   *
+   * So: wait until the nodes are readable AND writable by us, not merely there.
    */
   _waitForEndpoints(timeoutMs = 15000) {
     const deadline = Date.now() + timeoutMs;
     const paths = INTERFACES.map((s) => hidgPath(s.iface));
+    const ours = (p) => {
+      try { fs.accessSync(p, fs.constants.R_OK | fs.constants.W_OK); return true; }
+      catch { return false; }
+    };
     for (;;) {
-      if (paths.every((p) => fs.existsSync(p))) return true;
+      if (paths.every(ours)) return true;
       if (Date.now() >= deadline) return false;
       /* Synchronous wait: start() is synchronous and its caller expects it to
        * have either worked or thrown by the time it returns. Atomics.wait on a
