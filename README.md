@@ -23,6 +23,27 @@ EEPROM that persist across restarts.
 * [pm2](https://pm2.keymetrics.io/) — supervises the emulator process
 * The firmware sources and Teensyduino toolchain under `onlykey/` (see `setup.sh`)
 
+### Why `onlykey/` is not committed here
+
+`onlykey/` is a **swap slot**, not vendored dependencies. It holds separate
+checkouts of the firmware, its libraries, the toolchain, the test kit and the
+Python clients, and the point is that any of them can be substituted wholesale —
+a different fork, an upstream revision, a branch under test — without this repo
+changing at all. Committing those checkouts would freeze the one choice that is
+meant to stay loose. `okpqc-venv/` is not a repo either: it is *generated* from
+those checkouts, so it is an output, not a source.
+
+That is also why `onlykey/` is deliberately **not** in `.gitignore` — ignoring it
+hides it from editor and agent search, which costs more than the commit risk.
+`scripts/pre-commit` is what makes leaving it unignored safe: it refuses any
+staged path under `onlykey/`. Install it once with
+
+    cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+
+If you want a reproducible set, tag the component repos rather than pinning them
+here — a recorded known-good combination stays advisory, where a pin in this repo
+would defeat the swapping.
+
 ### Why a USB gadget
 
 Real software identifies an OnlyKey by fields that come from the USB

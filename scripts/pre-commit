@@ -2,12 +2,17 @@
 #
 # onlykey/ must never land in this repo.
 #
-# It holds four nested git repos (libraries, OnlyKey-Firmware, onlykey-testing,
-# python-onlykey), the generated okpqc-venv, and the vendored Arduino/Teensy
-# toolchain. It is deliberately NOT in .gitignore: ignoring it hides it from
-# editor and agent search, which is worse than the commit risk. This hook is
-# what makes leaving it unignored safe - a stray `git add .` fails here instead
-# of committing a few hundred megabytes of vendored tree.
+# It is a swap slot, not vendored dependencies: separate checkouts of the
+# firmware, its libraries, the Teensyduino toolchain, the test kit and the
+# Python clients, any of which can be substituted wholesale - a different fork,
+# an upstream revision, a branch under test - without this repo changing.
+# Committing them would freeze the one choice that is meant to stay loose.
+# okpqc-venv/ is not even a repo; it is generated from those checkouts.
+#
+# onlykey/ is deliberately NOT in .gitignore: ignoring it hides it from editor
+# and agent search, which costs more than the commit risk. This hook is what
+# makes leaving it unignored safe - a stray `git add .` fails here instead of
+# committing a few hundred megabytes of swappable tree.
 #
 # Local only (.git/hooks is not tracked). Reinstall with:
 #   cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
