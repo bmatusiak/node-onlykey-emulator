@@ -206,9 +206,55 @@ npm start       # nw .
 ```
 
 The window shows the NeoPixel colour live, six clickable buttons (click for a
-short press, hold past 400 ms for a long one), and a colour-coded log of every
-HID interface with per-interface filters. Toolbar buttons cover restart,
-rebuild-and-restart, and factory reset.
+tap; hold past 400 ms, 2 s or 5 s for the three hold tiers), and a colour-coded
+log of every HID interface with per-interface filters. Toolbar buttons cover
+restart, rebuild-and-restart, and factory reset.
+
+There is also a **Backup** control with a countdown. Backup is just a hold of
+button 1, but it is the one action whose output leaves this window: the firmware
+types the whole backup with `Keyboard.press()`, so it lands in whatever window
+the OS has focused. The countdown is there to give you time to click into an
+editor first. It sends the `hold` tier deliberately — `payload()` gates backup on
+`duration < 180 && duration >= 72`, so the deeper tiers overshoot that window and
+do nothing at all on non-DUO hardware. The device must be unlocked, and
+`backup()` returns immediately on a non-encrypted profile.
+
+Typing feels slower than a real device out of the box, and that is faithful, not
+a timing bug. The firmware paces every character with
+`delay((TYPESPEED[0] * TYPESPEED[0] / 3) * 8)` twice — once after the press, once
+after the release — and `TYPESPEED[0]` comes from EEPROM. On a device that has
+never been configured that byte is `0`, and `setup()` substitutes **4**
+(`OnlyKey.ino`, not the `= {3}` static initialiser), giving 40 ms per delay and
+~80 ms per character. A real device usually has a speed set through the app, so
+it types faster. Measured on the emulator: 81.5 ms/char at the fallback, 6.5 ms
+after `onlykey-cli keytypespeed 10`.
+
+The CLI value is inverted on the way in (`buffer[7] = 11 - buffer[7]`), so larger
+is faster:
+
+| `keytypespeed` | stored | per character |
+|---|---|---|
+| 10 | 1 | ~0 ms (as fast as the bus allows) |
+| 9 | 2 | 16 ms |
+| 8 | 3 | 48 ms |
+| 7 | 4 | 80 ms — the unconfigured fallback |
+| 6 | 5 | 128 ms |
+
+### Typed output
+
+**Typed output** (in the log pane's toolbar) decodes the HID1 keyboard reports
+back into text, alongside a per-key event log with inter-key timing and key
+names. Copy, save to a file, and optionally show key releases.
+
+This exists because the OS is not always a usable destination. The device types
+real HID usage codes, which only become keystrokes if something reads that
+keyboard's evdev node — and under a virtual display (Xvfb/Xpra, VNC) the
+session's input arrives from the remote client via XTEST, so nothing does. The
+keystrokes are correct and simply have no consumer; the emulated keyboard types
+into a machine nobody is sitting at. Decoding the reports at the source sidesteps
+that entirely, and also catches non-printing keys (Tab, Enter) that a slot uses
+to move between fields. To have the device really drive an application, pass the
+USB device through to a VM and let the guest bind it as a keyboard.
 
 The GUI hosts the IPC socket, so it can be started before or after the
 emulator — the emulator dials in whenever it comes up. It holds no authority
@@ -249,8 +295,11 @@ emu.on('led',  (px)   => console.log('LED', px[0]));
 emu.on('log',  (text) => process.stdout.write(text));   // HID4 debug output
 emu.on('hid',  (buf, iface) => console.log('HID', iface, buf.toString('hex')));
 
-emu.pressButton(3);                  // short press
-emu.pressButton(1, { long: true });  // long press
+emu.pressButton(3);                        // tap
+emu.pressButton(1, { hold: 'hold' });      // 128 - the >=72 actions
+emu.pressButton(6, { hold: 'longest' });   // 400 - the >=360 DUO action
+emu.pressButton(2, { ticks: 250 });        // exact duration
+emu.pressButtons([1, 2, 3, 4, 5, 6, 1]);   // a whole PIN, paced by the firmware
 ```
 
 Or over IPC — host the socket and let the emulator dial in. This is what the
@@ -283,21 +332,46 @@ them HID1–HID4, i.e. interface + 1.
 ### Buttons
 
 Button presses go through the firmware's own debug harness on HID4, not the
-analog touch pads — see `touch_sense_loop()` in `okcore.cpp`. An ASCII digit
-selects the button and a terminator commits it: newline for a short press,
-space for a long one.
+analog touch pads — see `touch_sense_loop()` in `okcore.cpp`. Bytes accumulate
+into a line and newline commits it.
 
-The same channel carries the firmware's other debug commands, which
-`emulator/index.js` wraps:
+A line starting with `1`–`6` is a sequence of presses, replayed one per
+firmware `loop()` iteration. Tokens are self-delimiting, so a whole PIN fits on
+one line and the caller never has to pace the digits itself:
 
-| Command | Method | Effect |
-|---------|--------|--------|
+| Line | Duration | Reaches |
+|------|----------|---------|
+| `1` | 1 | tap (`gen_press()`) |
+| `1!` | 128 | the `>=72` hold actions — backup, slot labels, config mode |
+| `1!!` | 200 | also the `>=140` key labels and `>=180` DUO config mode |
+| `1!!!` | 400 | also the `>=360` DUO factory default |
+| `1#250` | 250 | an exact duration, for testing a band boundary |
+| `1234567` | — | seven taps in order |
+
+Durations are the units `payload()` (`OnlyKey.ino`) compares against. A single
+fixed `128` used to be the only hold this channel could produce, which left
+every action from `140` up unreachable.
+
+The same channel carries the firmware's other debug commands as command paths —
+each byte selects a deeper node, so a destructive command needs its whole path
+spelled out in one line and no stray byte can trigger one:
+
+| Path | Method | Effect |
+|------|--------|--------|
 | `8` | `restartDevice()` | reboot (no data touched) |
-| `0` then `C` | `wipeUserspace()` + `confirmWipe()` | wipe PINs/profile/slots |
-| `9` then `C` | `wipeAll()` + `confirmWipe()` | full wipe, forces bootloader |
+| `0C` | `wipeUserspace()` | wipe PINs/profile/slots |
+| `9C` | `wipeAll()` | full wipe, forces bootloader |
 
-Both wipes require the explicit confirmation step — that is the firmware's own
-safeguard, not something added here.
+An unrecognised path does nothing at all beyond the `I received from DEBUG:`
+echo every committed line produces — carrying the line's first byte — which is
+what makes it usable as a readiness probe.
+
+Newline is the only terminator. Space used to be a second one meaning "long
+press", which made it unusable as ordinary input and clashed with clients that
+line-buffer; it is now rejected with a message rather than silently ignored, so
+a caller still sending the old `"<digit> "` form finds out immediately instead
+of watching its presses vanish. `onlykey/onlykey-testing` was updated to match
+— see `lib/hid.js`'s `sendLine()` / `sendPress()`.
 
 ---
 
