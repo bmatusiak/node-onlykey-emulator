@@ -14,6 +14,7 @@ const os = require('os');
 const fs = require('fs');
 
 const native = require('../build/Release/onlykey_emulator.node');
+const { IFACE } = require('..');
 
 const storageDir = process.argv[2] ||
   fs.mkdtempSync(path.join(os.tmpdir(), 'okemu-smoke-'));
@@ -27,9 +28,20 @@ const counts = { led: 0, kbd: 0, hid: 0, restart: 0 };
 native.start({
   storageDir,
 
-  onLog(buf) {
-    logBytes += buf.length;
-    process.stdout.write(buf.toString('latin1'));
+  // The addon exposes the whole bus as one callback and leaves the demuxing to
+  // JS, the same way index.js does it. There is no onLog/onKeyboard/onHid.
+  onStream(buf, iface, dir) {
+    if (dir !== 'out') return;
+    if (iface === IFACE.SEREMU) {
+      logBytes += buf.length;
+      process.stdout.write(buf.toString('latin1'));
+    } else if (iface === IFACE.KEYBOARD) {
+      counts.kbd++;
+      console.log(`\n[KBD] ${buf.toString('hex')}`);
+    } else {
+      counts.hid++;
+      console.log(`\n[HID iface=${iface}] ${buf.subarray(0, 16).toString('hex')}...`);
+    }
   },
 
   onLed(px) {
@@ -39,16 +51,6 @@ native.start({
       lastLed = s;
       console.log(`\n[LED] ${s}`);
     }
-  },
-
-  onKeyboard(buf) {
-    counts.kbd++;
-    console.log(`\n[KBD] ${buf.toString('hex')}`);
-  },
-
-  onHid(buf, iface) {
-    counts.hid++;
-    console.log(`\n[HID iface=${iface}] ${buf.subarray(0, 16).toString('hex')}...`);
   },
 
   onRestart() {
