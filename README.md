@@ -86,6 +86,16 @@ cannot see it.
 ./setup.sh
 ```
 
+Clones the seven component repos into `onlykey/`, provisions `okpqc-venv` from
+them (including `age`/`age-keygen`, which pip cannot supply), builds the
+firmware toolchain image if Docker is present, and builds the emulator addon.
+Re-running is safe: existing checkouts are left alone rather than re-cloned.
+Nothing is pinned — every clone tracks its default branch, so a component stays
+swappable.
+
+Needs `git`, `python3`, `make`, Node 18+, and either `curl` or `wget`. Docker is
+optional and only gates the device `.hex` build.
+
 ### 2. Grant device access (the one privileged step)
 
 The gadget needs `dummy_hcd`, which Ubuntu does not ship
