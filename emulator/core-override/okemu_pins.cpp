@@ -13,6 +13,7 @@
  */
 #include <stdint.h>
 #include <time.h>
+#include <stdlib.h>
 #include "ok_hal.h"
 
 extern "C" {
@@ -52,12 +53,15 @@ void okemu_sync_systick(void) {
  * speed - only spinning callers pay. 250 us is far below the 50 ms task
  * period, so scheduling resolution is unaffected.
  */
+static const uint32_t OKEMU_MICROS_THROTTLE_US =
+    getenv("OKEMU_THROTTLE_US") ? (uint32_t)atoi(getenv("OKEMU_THROTTLE_US")) : 250;
+
 uint32_t micros(void) {
   static uint32_t last_us = 0;
   uint32_t now = okemu_micros();
 
-  if (now - last_us < 250) {
-    struct timespec idle = { 0, 250000L };   /* 250 us */
+  if (now - last_us < OKEMU_MICROS_THROTTLE_US) {
+    struct timespec idle = { 0, OKEMU_MICROS_THROTTLE_US * 1000L };
     nanosleep(&idle, NULL);
     now = okemu_micros();
   }

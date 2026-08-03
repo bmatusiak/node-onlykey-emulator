@@ -253,9 +253,17 @@ class GadgetBridge {
     }
   }
 
-  /* The nodes appear asynchronously after bind; udev also has to apply the
-   * rule that makes them ours to open. Spin briefly rather than racing it. */
-  _waitForEndpoints(timeoutMs = 3000) {
+  /*
+   * The nodes appear asynchronously after bind, and udev has to apply the rule
+   * that makes them ours to open.
+   *
+   * The budget has to cover a whole restart cycle, not just the bind: measured
+   * on this machine a CPU_RESTART() takes ~5.8s from the request to the device
+   * answering again (unbind, pm2 respawn, node + addon load, firmware setup,
+   * rebind). An earlier 3s cap expired first, _openDevices() threw, the bridge
+   * reported unavailable, and the device never came back at all.
+   */
+  _waitForEndpoints(timeoutMs = 15000) {
     const deadline = Date.now() + timeoutMs;
     const paths = INTERFACES.map((s) => hidgPath(s.iface));
     for (;;) {

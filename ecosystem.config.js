@@ -30,8 +30,24 @@ module.exports = {
        */
       autorestart: true,
       restart_delay: 300,
-      exp_backoff_restart_delay: 200,
-      max_restarts: 50,
+
+      /*
+       * Deliberately NOT using exp_backoff_restart_delay, and no low
+       * max_restarts.
+       *
+       * Both exist to contain crash-loops, and both are actively wrong here:
+       * every CPU_RESTART() is a restart, so a test run legitimately produces
+       * hundreds. With exponential backoff the respawn delay grew until the
+       * device took longer to come back than clients allow after a reset
+       * (onlykey-testing's waitForDeviceReady gives 20s), and at
+       * max_restarts: 50 pm2 stopped respawning altogether mid-suite, leaving
+       * the device permanently absent.
+       *
+       * A fixed 300ms is the whole protection needed: it is imperceptible for
+       * a reboot but still stops a genuinely broken build from spinning the
+       * CPU. 0 disables the restart cap.
+       */
+      max_restarts: 0,
 
       /*
        * The firmware thread runs continuously and the native module maps fixed

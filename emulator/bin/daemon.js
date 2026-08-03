@@ -160,19 +160,19 @@ async function main() {
     log(`${why} - exiting (${code})`);
 
     /*
-     * NOT detaching from the bus here, deliberately.
+     * Leave the bus before leaving.
      *
-     * A firmware reset does re-enumerate on hardware, and unbinding the UDC on
-     * the way out would model that - but measured against the test harness it
-     * is worse, not better: the ~2s of pm2 respawn plus re-enumeration
-     * renumbers every hidraw node and outruns the reconnect budget clients
-     * allow after a restart, so 00-setup stopped being able to reattach at
-     * all. Staying bound keeps the device present-but-quiet for that window,
-     * which every client here already tolerates.
-     *
-     * bridge.detachBus() exists if this is revisited; it needs the harness
-     * side to wait for re-enumeration rather than a fixed delay.
+     * CPU_RESTART() re-enumerates on hardware, and clients depend on it: the
+     * test harness acknowledges a restart by watching the device DISAPPEAR
+     * (onlykey-testing/lib/config_mode.js's sendRestartAcked() polls
+     * isOnlyKeyPresent() and fails with "device never left the USB bus after 3
+     * restart presses" if it does not). Staying bound while pm2 respawns us
+     * presents a device that looks present but answers nothing, so callers
+     * both mis-detect the restart AND send into the void.
      */
+    try { if (bridge && bridge.detachBus) bridge.detachBus(); }
+    catch (e) { log('detachBus threw:', e.message); }
+
     try { ipc.close(); } catch (e) { log('ipc.close threw:', e.message); }
 
     /*
