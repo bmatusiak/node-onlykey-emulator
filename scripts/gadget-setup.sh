@@ -2,8 +2,15 @@
 #
 # gadget-setup.sh - bring up the emulated OnlyKey as a REAL USB device.
 #
+# Normally you do NOT run this directly - `sudo ./scripts/setup-permissions.sh`
+# is the single privileged setup command and calls this for you. It is kept
+# separately runnable for tearing the gadget down and rebuilding it:
+#
 #   sudo ./scripts/gadget-setup.sh          # create and bind
 #   sudo ./scripts/gadget-setup.sh --down   # tear down
+#
+# It is also what the onlykey-gadget.service systemd unit runs at boot, since
+# configfs does not persist across reboots.
 #
 # Why this exists
 # ---------------
@@ -25,6 +32,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 GADGET=/sys/kernel/config/usb_gadget/onlykey
 KREL="$(uname -r)"
 KO="$REPO/build/dummy_hcd/dummy_hcd.ko"
@@ -169,6 +177,35 @@ udevadm control --reload-rules
 udevadm trigger --subsystem-match=hidg 2>/dev/null || true
 udevadm settle --timeout=5 || true
 for n in /dev/hidg*; do [[ -e $n ]] && chown "$TARGET_USER" "$n" 2>/dev/null || true; done
+
+# --------------------------------------------------------------- at boot
+#
+# configfs is volatile: the whole gadget tree vanishes on reboot even though
+# dummy_hcd itself is reloaded by /etc/modules-load.d. Without this the device
+# is simply absent after a restart until someone re-runs this script by hand.
+UNIT=/etc/systemd/system/onlykey-gadget.service
+cat > "$UNIT" <<EOF
+[Unit]
+Description=OnlyKey emulator USB gadget
+# configfs must be mounted and dummy_hcd loaded before the gadget can be built.
+After=systemd-modules-load.service sys-kernel-config.mount
+Requires=sys-kernel-config.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=NODE_BIN=$NODE_BIN
+ExecStart=$SCRIPT_SELF
+ExecStop=$SCRIPT_SELF --down
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable onlykey-gadget.service >/dev/null 2>&1 \
+  && echo "==> Installed $UNIT (gadget is rebuilt at boot)" \
+  || echo "    could not enable onlykey-gadget.service - re-run this script after a reboot"
 
 # ------------------------------------------------------------- diagnostics
 echo

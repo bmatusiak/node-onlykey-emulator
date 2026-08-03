@@ -38,20 +38,34 @@ RULE_FILE=/etc/udev/rules.d/70-onlykey-emulator.rules
 MODULE_FILE=/etc/modules-load.d/onlykey-emulator.conf
 GROUP=plugdev
 
-if [[ $EUID -ne 0 ]]; then
-  echo "This script needs root. Re-run with:  sudo $0" >&2
-  exit 1
-fi
-
-# The user who invoked sudo - that is who should end up with access.
-TARGET_USER="${SUDO_USER:-}"
-if [[ -z "$TARGET_USER" || "$TARGET_USER" == "root" ]]; then
-  echo "warning: could not determine the non-root user (SUDO_USER unset)." >&2
-  echo "         Skipping group membership; the uaccess rule will still apply." >&2
+#
+# Run this as YOURSELF, not under sudo:
+#
+#     ./scripts/setup-permissions.sh
+#
+# It elevates the individual steps that need root and leaves everything else
+# unprivileged. That ordering matters: dummy_hcd is compiled here, and building
+# under sudo would leave root-owned objects in build/ that you then need root to
+# clean up - and, more importantly, runs a Makefile as root for no reason.
+#
+if [[ $EUID -eq 0 ]]; then
+  TARGET_USER="${SUDO_USER:-root}"
+  if [[ "$TARGET_USER" == "root" ]]; then
+    echo "warning: running as root with no SUDO_USER." >&2
+    echo "         Prefer:  ./scripts/setup-permissions.sh   (no sudo - it elevates itself)" >&2
+  fi
+  SUDO=""
+else
+  TARGET_USER="$USER"
+  SUDO="sudo"
+  # Prompt once up front rather than at each step, so the run does not stall
+  # halfway through waiting for a password.
+  echo "==> This needs root for a few steps; authenticating once now"
+  sudo -v || { echo "    cannot elevate - aborting" >&2; exit 1; }
 fi
 
 echo "==> Loading the uhid kernel module"
-if modprobe uhid 2>/dev/null; then
+if $SUDO modprobe uhid 2>/dev/null; then
   echo "    uhid loaded"
 else
   # Built into the kernel rather than a module on some distros - fine either way.
@@ -65,7 +79,7 @@ else
 fi
 
 echo "==> Making uhid load at boot ($MODULE_FILE)"
-echo "uhid" > "$MODULE_FILE"
+echo uhid | $SUDO tee "$MODULE_FILE" >/dev/null
 
 echo "==> Installing udev rule ($RULE_FILE)"
 SRC_RULE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/70-onlykey-emulator.rules"
@@ -73,12 +87,12 @@ if [[ ! -f "$SRC_RULE" ]]; then
   echo "    ERROR: rule file not found: $SRC_RULE" >&2
   exit 1
 fi
-install -m 0644 "$SRC_RULE" "$RULE_FILE"
+$SUDO install -m 0644 "$SRC_RULE" "$RULE_FILE"
 echo "    installed from $SRC_RULE"
 
 if ! getent group "$GROUP" >/dev/null; then
   echo "==> Creating group $GROUP"
-  groupadd "$GROUP"
+  $SUDO groupadd "$GROUP"
 fi
 
 if [[ -n "$TARGET_USER" && "$TARGET_USER" != "root" ]]; then
@@ -86,14 +100,14 @@ if [[ -n "$TARGET_USER" && "$TARGET_USER" != "root" ]]; then
     echo "==> $TARGET_USER is already in $GROUP"
   else
     echo "==> Adding $TARGET_USER to $GROUP"
-    usermod -aG "$GROUP" "$TARGET_USER"
+    $SUDO usermod -aG "$GROUP" "$TARGET_USER"
     NEED_RELOGIN=1
   fi
 fi
 
 echo "==> Lowering vm.mmap_min_addr to 4096 (page zero stays protected)"
-sysctl -w vm.mmap_min_addr=4096 >/dev/null
-cat > /etc/sysctl.d/70-onlykey-emulator.conf <<'EOF'
+$SUDO sysctl -w vm.mmap_min_addr=4096 >/dev/null
+$SUDO tee /etc/sysctl.d/70-onlykey-emulator.conf >/dev/null <<'EOF'
 # The OnlyKey emulator maps the emulated MK20DX256 flash at its real
 # addresses; the firmware's key material lives at 0x5BB0 and is read by every
 # AES-GCM operation. One page, so NULL dereferences still fault.
@@ -102,12 +116,12 @@ EOF
 echo "    now: $(sysctl -n vm.mmap_min_addr)"
 
 echo "==> Reloading udev rules"
-udevadm control --reload-rules
-udevadm trigger --subsystem-match=misc --sysname-match=uhid || true
+$SUDO udevadm control --reload-rules
+$SUDO udevadm trigger --subsystem-match=misc --sysname-match=uhid || true
 # Re-apply to any hidraw nodes the emulator has already created, so a running
 # emulator picks up the new permissions without being restarted.
-udevadm trigger --subsystem-match=hidraw || true
-udevadm settle --timeout=5 || true
+$SUDO udevadm trigger --subsystem-match=hidraw || true
+$SUDO udevadm settle --timeout=5 || true
 
 # ---------------------------------------------------------------------------
 # The USB gadget transport (default).
@@ -121,16 +135,36 @@ udevadm settle --timeout=5 || true
 # the UHID bridge (OKEMU_BRIDGE=uhid) still works without it.
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f "$SCRIPT_DIR/../build/dummy_hcd/dummy_hcd.ko" ]]; then
-  echo
-  echo "==> Setting up the USB gadget transport"
-  "$SCRIPT_DIR/gadget-setup.sh" || echo "    gadget setup failed - UHID still available"
+KO="$SCRIPT_DIR/../build/dummy_hcd/dummy_hcd.ko"
+
+echo
+echo "==> USB gadget transport"
+
+# Build the module if it is missing, so this stays the single setup command.
+# Built as the invoking user, not root: the output lands in the repo's build/
+# directory and root-owned artifacts there would need sudo to clean up later.
+if [[ ! -f $KO ]]; then
+  if [[ ! -d /lib/modules/$(uname -r)/build || ! -f /usr/src/linux-source-$(uname -r | cut -d- -f1).tar.bz2 ]]; then
+    echo "    Kernel headers and/or source are missing. Install them, then re-run:"
+    echo "      sudo apt install linux-headers-\$(uname -r) linux-source-\$(uname -r | cut -d- -f1)"
+    echo "    Skipping the gadget; the UHID transport (OKEMU_BRIDGE=uhid) still works."
+  else
+    echo "    dummy_hcd.ko not built yet - building it now (unprivileged)"
+    "$SCRIPT_DIR/build-dummy-hcd.sh" || true
+  fi
+fi
+
+if [[ -f $KO ]]; then
+  # Pass NODE_BIN through: gadget-setup.sh reads the HID descriptors with node,
+  # which is usually a per-user nvm install and so absent from root's PATH.
+  # node is typically an nvm install, so absent from root's PATH - resolve it
+  # here, while still unprivileged, and hand the path across.
+  GADGET_NODE="$(command -v node 2>/dev/null || true)"
+  $SUDO env NODE_BIN="$GADGET_NODE" SUDO_USER="$TARGET_USER" \
+    "$SCRIPT_DIR/gadget-setup.sh" \
+    || echo "    gadget setup failed - the UHID transport is still available"
 else
-  echo
-  echo "==> USB gadget transport NOT set up (dummy_hcd.ko not built)"
-  echo "    Build it first, as your normal user, then re-run this script:"
-  echo "      sudo apt install linux-source-\$(uname -r | cut -d- -f1) linux-headers-\$(uname -r)"
-  echo "      ./scripts/build-dummy-hcd.sh"
+  echo "    not set up; the UHID transport (OKEMU_BRIDGE=uhid) still works."
 fi
 
 echo

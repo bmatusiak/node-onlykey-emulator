@@ -63,39 +63,39 @@ cannot see it.
 ./setup.sh
 ```
 
-### 2. Build the `dummy_hcd` module
+### 2. Grant device access (the one privileged step)
 
-Ubuntu ships `# CONFIG_USB_DUMMY_HCD is not set`, so no package provides it and
-it has to be compiled. Everything else the gadget needs (`libcomposite`,
-`usb_f_hid`, `CONFIG_USB_CONFIGFS_F_HID`) is already in the stock kernel.
+The gadget needs `dummy_hcd`, which Ubuntu does not ship
+(`# CONFIG_USB_DUMMY_HCD is not set`), so it has to be compiled — everything
+else it needs (`libcomposite`, `usb_f_hid`, `CONFIG_USB_CONFIGFS_F_HID`) is
+already in the stock kernel. Install the kernel headers and source first:
 
 ```sh
 sudo apt install linux-headers-$(uname -r) linux-source-$(uname -r | cut -d- -f1)
-./scripts/build-dummy-hcd.sh          # no root needed
 ```
 
-The result lands in `build/dummy_hcd/dummy_hcd.ko` (gitignored — it is tied to
-one exact kernel release, so rebuild it rather than commit it).
-
-### 3. Grant device access (one-time, root)
-
-Both transports need device nodes that are root-only by default. Doing this
-once means **nothing afterwards needs sudo** — not the daemon, not pm2, not the
-GUI. One script covers everything:
+Then run **the one setup command** — as yourself, *without* sudo. It elevates
+only the individual steps that need root, so the kernel module is compiled
+unprivileged rather than leaving root-owned objects in `build/`:
 
 ```sh
-sudo ./scripts/setup-permissions.sh
+./scripts/setup-permissions.sh
 ```
 
-It installs the udev rules (`/dev/uhid` and `/dev/hidg*`), lowers
-`vm.mmap_min_addr`, and — if `dummy_hcd.ko` was built in step 2 — installs the
-module and creates the USB gadget by delegating to
-[`scripts/gadget-setup.sh`](scripts/gadget-setup.sh). That script can also be
-run on its own:
+It builds `dummy_hcd` if needed, installs it, loads the
+gadget modules, creates the USB gadget, installs the udev rules
+(`/dev/uhid` and `/dev/hidg*`), lowers `vm.mmap_min_addr`, and enables a
+systemd unit that rebuilds the gadget at boot — configfs is volatile, so
+without that the device is absent after a reboot.
+
+**Nothing afterwards needs sudo** — not the daemon, not pm2, not the GUI.
+
+Two helpers it calls, occasionally useful on their own:
 
 ```sh
-sudo ./scripts/gadget-setup.sh          # create and bind
-sudo ./scripts/gadget-setup.sh --down   # tear down
+./scripts/build-dummy-hcd.sh            # rebuild the module (no root)
+sudo ./scripts/gadget-setup.sh --down   # tear the gadget down
+sudo systemctl restart onlykey-gadget   # rebuild it
 ```
 
 The gadget is built from [`emulator/lib/hid-descriptors.js`](emulator/lib/hid-descriptors.js),
@@ -104,8 +104,6 @@ builds its `UHID_CREATE2` from the same table, so the two transports cannot
 drift apart.
 
 The udev/uhid half by hand, if you prefer:
-
-…or do the same by hand:
 
 ```sh
 # make the uhid module available, now and at boot
@@ -156,7 +154,7 @@ segfaults the moment it encrypts anything, such as storing a PIN.
 Without it the emulator still boots and the HID interfaces work, but any
 crypto operation will crash; it prints a warning at startup saying so.
 
-### 4. Build the native module
+### 3. Build the native module
 
 ```sh
 cd emulator
