@@ -16,6 +16,40 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 AGE_VERSION="v1.2.1"
 
+# Downloads $1 to stdout with whichever fetcher this machine has. Neither is
+# guaranteed - a stock Ubuntu server has wget and no curl, and a minimal
+# container often has curl and no wget.
+FETCHER=""
+if command -v curl >/dev/null 2>&1; then
+  FETCHER="curl"
+elif command -v wget >/dev/null 2>&1; then
+  FETCHER="wget"
+fi
+
+fetch() {
+  case "$FETCHER" in
+    curl) curl -fsSL "$1" ;;
+    wget) wget -qO- "$1" ;;
+    *)    echo "!! no downloader available" >&2; return 1 ;;
+  esac
+}
+
+# Check everything up front. Failing on the first missing tool beats discovering
+# it after seven clones and a venv build.
+missing=()
+for tool in git python3 make tar install npm node; do
+  command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+done
+[ -n "$FETCHER" ] || missing+=("curl or wget")
+
+if [ ${#missing[@]} -gt 0 ]; then
+  echo "!! missing required tools: ${missing[*]}" >&2
+  echo "   Docker is optional and only gates the device .hex build." >&2
+  exit 1
+fi
+
+echo "== using $FETCHER for downloads"
+
 # Clone into $2 only if it is not already there, so re-running is a no-op.
 clone() {
   if [ -d "$2/.git" ]; then
@@ -69,16 +103,7 @@ if [ ! -x ./okpqc-venv/bin/age ]; then
     echo "== fetching age $AGE_VERSION ($AGE_ARCH)"
     AGE_URL="https://github.com/FiloSottile/age/releases/download/${AGE_VERSION}/age-${AGE_VERSION}-linux-${AGE_ARCH}.tar.gz"
     tmp="$(mktemp -d)"
-    # Neither fetcher is guaranteed present - this box has wget but no curl.
-    if command -v curl >/dev/null 2>&1; then
-      curl -fsSL "$AGE_URL" | tar -xz -C "$tmp"
-    elif command -v wget >/dev/null 2>&1; then
-      wget -qO- "$AGE_URL" | tar -xz -C "$tmp"
-    else
-      echo "!! neither curl nor wget found - install one, or drop age and" >&2
-      echo "   age-keygen into onlykey/okpqc-venv/bin by hand." >&2
-      rm -rf "$tmp"; exit 1
-    fi
+    fetch "$AGE_URL" | tar -xz -C "$tmp"
     install -m 0755 "$tmp/age/age" "$tmp/age/age-keygen" ./okpqc-venv/bin/
     rm -rf "$tmp"
   else
