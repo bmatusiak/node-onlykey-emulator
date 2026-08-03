@@ -114,7 +114,7 @@ class IpcPeer extends EventEmitter {
   _onCommand(msg) {
     try {
       switch (msg.t) {
-        case 'press':         this.emu.pressButton(msg.button, { long: !!msg.long }); break;
+        case 'press':         this.emu.pressButton(msg.button, { hold: msg.hold, ticks: msg.ticks }); break;
         case 'setButton':     this.emu.setButton(msg.button, !!msg.down); break;
         case 'writeHid':      this.emu.writeHid(b64.unpack(msg.data), msg.iface); break;
         case 'factoryReset':  this.emu.factoryReset(); break;
@@ -145,9 +145,11 @@ class IpcPeer extends EventEmitter {
     emu.on('keyboard', (data) => this._send({ t: 'keyboard', data: b64.pack(data) }));
     emu.on('log', (text) => this._send({ t: 'log', text }));
     emu.on('stream', ({ buffer, iface, name, dir }) => {
-      /* SEREMU output already goes out as `log`; re-sending it as a hid frame
-       * would double every line in the GUI's debug view. */
-      if (name === 'seremu' && dir === 'out') return;
+      /* Outbound SEREMU and keyboard traffic already goes out as `log` and
+       * `keyboard`; re-sending it as a hid frame would double every line in the
+       * GUI's debug view. Only the outbound half - the keyboard's inbound
+       * frames are the host's LED reports, which have no other message. */
+      if (dir === 'out' && (name === 'seremu' || name === 'keyboard')) return;
       this._send({ t: 'hid', iface, name, dir, data: b64.pack(buffer) });
     });
     emu.on('restart', () => this._send({ t: 'restart' }));
