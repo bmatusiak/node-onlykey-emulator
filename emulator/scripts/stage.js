@@ -79,6 +79,61 @@ const DROP = [
  *     overridden from outside because the header's own #define always wins.
  *  2. Declaration inconsistencies that arm-none-eabi-g++ 4.8 accepted but
  *     GCC 14+ rejects outright.
+ *  3. Non-void functions with a path that falls off the end. See MISSING_RETURNS.
+ */
+
+/*
+ * FALLING OFF THE END OF A NON-VOID FUNCTION.
+ *
+ * Three firmware functions have a control path that reaches the closing brace
+ * without a return. That is undefined behaviour, and the two compilers make
+ * wildly different choices about it:
+ *
+ *   arm-none-eabi-g++ 4.8 -Os  emits the ordinary epilogue and returns
+ *                              whatever happens to be in r0. Garbage, but the
+ *                              stack is intact and the caller resumes.
+ *   x86-64 GCC 14 -O2          treats the end as unreachable and emits NO
+ *                              epilogue and NO ret. Control simply runs into
+ *                              whatever basic block was laid out next.
+ *
+ * For ctap_flash() that is not a subtle difference. GCC laid the tail of the
+ * mode==2 body directly ahead of the shared "erase failed" block and closed
+ * the loop with a jump back into the middle of the function:
+ *
+ *     bd0e: call flashEraseSector
+ *     bd1a: test %eax,%eax
+ *     bd1c: jne  bd91                 <- erase failed -> print "NOT "
+ *     bd1e: call println("successful")
+ *     ...   call okcore_flashset_common / print "CTAP address =" / "CTAP value ="
+ *     bd91: call println("NOT ")      <- fallen off the end, lands here
+ *     bda4: jmp  bd1e                 <- ...and loops, forever
+ *
+ * ctap_flash(mode 2) is the store-resident-key path, so this fired the moment
+ * a FIDO2 registration was approved: the firmware thread spun at 100% CPU
+ * inside that three-print loop, never returned to ctap_make_credential(), and
+ * never sent a CTAPHID response - which the browser reported as a plain
+ * "response timeout" from the security-key prompt. The pm2 log is the loop,
+ * 3.4 million lines of it, after a single "CTAP Flash mode= 2".
+ *
+ * The other two are the same defect on paths that had not yet been hit. They
+ * are fixed here too rather than left as landmines: each is one edge of the
+ * same FIDO2 request handling.
+ *
+ * Returning the value each function's own successful path returns reproduces
+ * the ARM build's intent without inventing behaviour - and in every case the
+ * callers of the affected path ignore the result:
+ *
+ *   ctap_flash            mode 2 (write RK) is called for effect;
+ *                         device.cpp:447 and okcore.cpp:7067 discard it. Only
+ *                         mode 3 is read (device.cpp:233) and that returns.
+ *   ctap_atomic_count     the amount != 0 paths come from ctaphid.cpp:835,
+ *                         which ignores the result. Every reader passes 0.
+ *   send_stored_response  falls through when profilemode is
+ *                         NONENCRYPTEDPROFILE; ret is still its initial 0.
+ *
+ * Worth knowing for the next one of these: the firmware target compiles with
+ * -w, so -Wreturn-type never printed. To re-scan, drop -w from binding.gyp's
+ * okemu_firmware cflags and grep the build for "control reaches end".
  */
 const PATCHES = [
   {
@@ -180,6 +235,39 @@ const PATCHES = [
        */
       ['\t\tuintptr_t adr = 0x0;\n\t\tfor (int i = 0; i < 65536; i += 4)',
        '\t\tuintptr_t adr = 0x1000;\n\t\tfor (int i = 0; i < 65536; i += 4)'],
+
+      /*
+       * ctap_flash() - the mode==2 (write resident key) branch is the only one
+       * with no return. See MISSING_RETURNS above; this is the one that hung
+       * every FIDO2 registration. Every other branch returns 0 on success.
+       */
+      ['\t\t//hidprint("Successfully set CTAP Value");\n\t}\n\t#endif\n}',
+       '\t\t//hidprint("Successfully set CTAP Value");\n\t}\n\t#endif\n\treturn 0;\n}'],
+    ],
+  },
+  {
+    /*
+     * ctap_atomic_count() - the amount != 0 branches set the counter and then
+     * fall off the end. Returning the stored value is what the amount == 0
+     * branch does; re-reading it keeps the two consistent. See MISSING_RETURNS.
+     */
+    file: 'libraries/fido2/device.cpp',
+    edits: [
+      ['    } else {\n        setCounter(amount+counter1);\n    }\n}',
+       '    } else {\n        setCounter(amount+counter1);\n    }\n    return getCounter();\n}'],
+    ],
+  },
+  {
+    /*
+     * send_stored_response() - the whole body is inside
+     * `if (profilemode != NONENCRYPTEDPROFILE)`, so a non-encrypted profile
+     * falls off the end. ret is still 0 there, which is what the inner return
+     * would have produced. See MISSING_RETURNS.
+     */
+    file: 'libraries/fido2/ok_extension.cpp',
+    edits: [
+      ['\t\treturn ret; \n\t}\n}',
+       '\t\treturn ret; \n\t}\n\treturn ret;\n}'],
     ],
   },
   {
