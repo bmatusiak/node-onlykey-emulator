@@ -180,29 +180,62 @@ const logEl = $('log');
  * process.cwd() IS correct (the app directory), so that is the fallback that
  * actually works; the others are tried first in case a future runtime differs.
  */
-function loadIpcHost() {
+function requireEmu(rel) {
   const tried = [];
   const attempts = [
-    () => require('../emulator/lib/ipc-host'),
+    () => require('../emulator/' + rel),
     () => {
       const path = require('path');
       const dir = decodeURIComponent(new URL('.', window.location.href).pathname);
-      return require(path.join(dir, '..', 'emulator', 'lib', 'ipc-host'));
+      return require(path.join(dir, '..', 'emulator', rel));
     },
     () => {
       const path = require('path');
-      return require(path.join(process.cwd(), '..', 'emulator', 'lib', 'ipc-host'));
+      return require(path.join(process.cwd(), '..', 'emulator', rel));
     },
   ];
   for (const fn of attempts) {
     try { return fn(); } catch (err) { tried.push(err.message); }
   }
-  throw new Error('cannot load ipc-host:\n  ' + tried.join('\n  '));
+  throw new Error('cannot load ' + rel + ':\n  ' + tried.join('\n  '));
 }
 
 const IFACE_TAG = { 0: 'HID1', 1: 'HID2', 2: 'HID3', 3: 'HID4' };
 const shown = new Set([0, 1, 2, 3]);
 const MAX_ROWS = 2000;   // keep the DOM bounded - the device is chatty
+
+/*
+ * Rows are batched and flushed once per animation frame.
+ *
+ * Appending each row as it arrives locked the window up. The row cap alone is
+ * not enough: reading logEl.scrollHeight forces a synchronous layout, so a
+ * chatty device (touch_sense_loop's DEBUG output runs continuously, and a test
+ * run adds hex dumps of every packet) meant hundreds of forced reflows per
+ * second and the renderer never caught up.
+ *
+ * One DocumentFragment insert, one trim and one scroll per frame instead,
+ * regardless of how many lines arrived.
+ */
+let pendingRows = [];
+let flushScheduled = false;
+
+function flushRows() {
+  flushScheduled = false;
+  if (!pendingRows.length) return;
+
+  /* A burst larger than the cap can drop its own excess before touching the
+   * DOM - those rows would be trimmed off immediately anyway. */
+  const rows = pendingRows.length > MAX_ROWS
+    ? pendingRows.slice(-MAX_ROWS) : pendingRows;
+  pendingRows = [];
+
+  const frag = document.createDocumentFragment();
+  for (const r of rows) frag.append(r);
+  logEl.append(frag);
+
+  while (logEl.childElementCount > MAX_ROWS) logEl.firstElementChild.remove();
+  if ($('autoscroll').checked) logEl.scrollTop = logEl.scrollHeight;
+}
 
 function append(tagText, tagClass, text, dirIn) {
   const row = document.createElement('div');
@@ -217,10 +250,12 @@ function append(tagText, tagClass, text, dirIn) {
   msg.textContent = text;
 
   row.append(tag, msg);
-  logEl.append(row);
+  pendingRows.push(row);
 
-  while (logEl.childElementCount > MAX_ROWS) logEl.firstElementChild.remove();
-  if ($('autoscroll').checked) logEl.scrollTop = logEl.scrollHeight;
+  if (!flushScheduled) {
+    flushScheduled = true;
+    requestAnimationFrame(flushRows);
+  }
 }
 
 const sys = (text) => append('SYS', 'sys', text);
@@ -284,7 +319,7 @@ for (let n = 1; n <= 6; n++) {
 /* ---------- connection ---------- */
 let IpcHost;
 try {
-  IpcHost = loadIpcHost();
+  IpcHost = requireEmu('lib/ipc-host');
 } catch (err) {
   fatal(err);
   throw err;
@@ -369,20 +404,54 @@ document.querySelectorAll('.chip[data-iface]').forEach((chip) => {
 });
 
 /*
- * Plug / unplug models the USB cable: it tears the HID interfaces down and
- * back up, so the OS and every client see the key removed and reinserted. The
- * firmware keeps running with its RAM intact - for a power cycle use Restart.
+ * Plug / unplug is a real power cycle, because that is what it is on hardware:
+ * an OnlyKey is bus-powered, so pulling the cable both removes it from the bus
+ * AND cuts power to the MCU. Unplug therefore unbinds the gadget from the UDC
+ * (Linux stops seeing the device entirely) and stops the emulator process; the
+ * firmware loses its RAM exactly as the real one does.
+ *
+ * This is what makes the firmware's own advice work. exceeded_login_attempts()
+ * is an infinite loop printing "remove OnlyKey and reinsert" - on hardware the
+ * removal resets the MCU, which is the only way out. While unplug left the
+ * firmware running, that instruction did nothing.
+ *
+ * Driven from here rather than over IPC: the emulator cannot be asked to start
+ * itself once it is stopped, and stopping goes through pm2 so its supervisor
+ * does not immediately respawn it.
  */
+/* Loaded on first use, not at parse time: a failure here must not take the
+ * whole script down (which renders a window that looks fine but does nothing). */
+let power = null;
+function getPower() {
+  if (!power) power = requireEmu('lib/power');
+  return power;
+}
+
 let plugged = true;
+let powerBusy = false;
 function setPluggedUi(v) {
   if (typeof v === 'boolean') plugged = v;
   $('btn-plug').textContent = plugged ? 'Unplug' : 'Plug in';
   $('btn-plug').classList.toggle('danger', plugged);
+  $('btn-plug').disabled = powerBusy;
 }
-$('btn-plug').addEventListener('click', () => {
+$('btn-plug').addEventListener('click', async () => {
+  if (powerBusy) return;
   const want = !plugged;
-  client._send({ t: 'setPlugged', plugged: want });
-  sys(want ? 'plugging in…' : 'unplugging…');
+  powerBusy = true;
+  setPluggedUi();
+  sys(want ? 'powering on…' : 'cutting power…');
+  try {
+    const pw = getPower();
+    if (want) await pw.powerOn(); else await pw.powerOff();
+    setPluggedUi(want);
+    sys(want ? 'plugged in' : 'unplugged (emulator stopped)');
+  } catch (err) {
+    sys('power toggle failed: ' + err.message);
+  } finally {
+    powerBusy = false;
+    setPluggedUi();
+  }
 });
 setPluggedUi(true);
 
@@ -417,6 +486,9 @@ $('btn-clear').addEventListener('click', () => {
    */
   logEl.replaceChildren();
   seremuPending = '';
+  /* Rows already queued for the next frame would repopulate the view a
+   * moment after it was cleared. */
+  pendingRows = [];
 });
 $('btn-restart').addEventListener('click', () => client.restartDevice());
 $('btn-rebuild').addEventListener('click', () => {

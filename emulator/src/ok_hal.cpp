@@ -12,8 +12,10 @@
 #include <string.h>
 #include <time.h>
 
+#include <atomic>
 #include <chrono>
 #include <mutex>
+#include <thread>
 #include <condition_variable>
 #include <deque>
 #include <string>
@@ -324,10 +326,54 @@ int okemu_hal_init(const char *storage_dir, char *err, size_t errlen) {
   *(volatile uint8_t *)kFTFL_FSEC = low_mapped ? 0xFF : 0x44;
 
   okemu_time_start();
+  okemu_systick_start();   /* millis() must advance without the firmware asking */
   return 0;
 }
 
+/*
+ * The SysTick tick.
+ *
+ * millis() is a static inline in core_pins.h that reads systick_millis_count
+ * directly, so the only way to make it advance is to advance that counter. On
+ * the MK20DX256 the SysTick interrupt does it at 1 kHz, completely
+ * independently of what the main loop happens to be executing.
+ *
+ * Feeding it from micros() instead - as this did originally - looks equivalent
+ * only while every waiting loop also polls micros(). payload() does not:
+ *
+ *     unsigned long wait = millis() + 200;
+ *     while (millis() < wait) { recvmsg(0); }   // never calls micros()
+ *
+ * That loop runs on the successful-unlock path. With the counter frozen it
+ * never terminated: RawHID kept being serviced from inside the loop, so the
+ * device still answered status queries and looked healthy, while checkKey()
+ * never returned and touch_sense_loop() - and with it the whole SEREMU debug
+ * channel and every button - was dead from the moment the PIN was accepted.
+ *
+ * A dedicated thread is the honest emulation of a hardware timer interrupt.
+ */
+static std::thread      g_systick_thread;
+static std::atomic<bool> g_systick_run{false};
+
+void okemu_systick_start(void) {
+  if (g_systick_run.exchange(true)) return;
+  okemu_sync_systick();               /* don't start from zero */
+  g_systick_thread = std::thread([] {
+    while (g_systick_run.load(std::memory_order_relaxed)) {
+      okemu_sync_systick();
+      struct timespec t = { 0, 500000L };   /* 500 us - twice SysTick's rate */
+      nanosleep(&t, NULL);
+    }
+  });
+}
+
+void okemu_systick_stop(void) {
+  if (!g_systick_run.exchange(false)) return;
+  if (g_systick_thread.joinable()) g_systick_thread.join();
+}
+
 void okemu_hal_shutdown(void) {
+  okemu_systick_stop();
   if (g.eeprom_fd >= 0) {
     pwrite(g.eeprom_fd, g.eeprom, OKEMU_EEPROM_SIZE, 0);
     ::close(g.eeprom_fd);
@@ -484,6 +530,11 @@ int okemu_hid_pending(void) {
   for (const auto &p : g.hid_in)
     if (p.iface == OKEMU_IFACE_FIDO) n += 64;
   return n;
+}
+
+void okemu_hid_flush_in(void) {
+  std::lock_guard<std::mutex> lk(g.mu);
+  g.hid_in.clear();
 }
 
 int okemu_hid_emit(const uint8_t *data, size_t len, uint32_t /*timeout*/, int iface) {

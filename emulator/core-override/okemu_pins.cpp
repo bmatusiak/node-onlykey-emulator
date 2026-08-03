@@ -21,8 +21,16 @@ extern "C" {
 
 volatile uint32_t systick_millis_count = 0;
 
+/*
+ * Written by both the SysTick thread and the firmware thread, so only ever
+ * move it forward - a stale write going backwards would break the overflow
+ * arithmetic in SoftTimerClass::testAndCall(). Signed difference so the
+ * comparison stays correct across the 32-bit wrap, exactly as the firmware's
+ * own millis() comparisons do.
+ */
 void okemu_sync_systick(void) {
-  systick_millis_count = okemu_micros() / 1000u;
+  const uint32_t ms = okemu_micros() / 1000u;
+  if ((int32_t)(ms - systick_millis_count) > 0) systick_millis_count = ms;
 }
 
 /*

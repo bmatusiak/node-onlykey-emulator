@@ -101,8 +101,15 @@ void     okemu_time_start(void);
 uint32_t okemu_micros(void);
 void     okemu_delay_ms(uint32_t ms);
 /* Republishes the host clock into the core's systick_millis_count, which
- * Teensy's millis() reads inline. */
+ * Teensy's millis() reads inline. Monotonic: safe to call from both the
+ * SysTick thread and the firmware thread. */
 void     okemu_sync_systick(void);
+
+/* Stands in for the SysTick interrupt: keeps systick_millis_count advancing
+ * on its own, so millis() moves even in loops that never call micros().
+ * The firmware has such a loop on the unlock path. */
+void     okemu_systick_start(void);
+void     okemu_systick_stop(void);
 
 /* ------------------------------------------------------------ buttons */
 
@@ -149,6 +156,8 @@ int  okemu_hid_emit(const uint8_t *data, size_t len, uint32_t timeout, int iface
  * using this value, so the distinction matters.
  */
 int  okemu_hid_recv(void *buf, uint32_t timeout);
+/* Drop every queued inbound report - backs wipe_usb_buffer(). */
+void okemu_hid_flush_in(void);
 /* Bytes waiting on the FIDO interface, for RawHID.available(). */
 int  okemu_hid_pending(void);
 

@@ -23,7 +23,34 @@ const fs = require('fs');
 const path = require('path');
 const EventEmitter = require('events');
 
+const { execFileSync } = require('child_process');
+
 const { defaultSocketPath, createFramer, encode, b64 } = require('./protocol');
+
+/*
+ * Is anything actually accepting connections on this path?
+ *
+ * Done in a short-lived child rather than asynchronously, because listen() is
+ * synchronous and callers rely on it either working or throwing. A refused
+ * connection (ECONNREFUSED) means the file is stale and safe to remove;
+ * anything else means someone is there.
+ */
+function probeLiveSocket(socketPath) {
+  const script =
+    'const net=require("net");' +
+    'const s=net.connect(process.argv[1]);' +
+    's.on("connect",()=>{s.destroy();process.exit(0);});' +
+    's.on("error",()=>process.exit(3));' +
+    'setTimeout(()=>process.exit(3),500);';
+  try {
+    execFileSync(process.execPath, ['-e', script, socketPath], {
+      stdio: 'ignore', timeout: 2000,
+    });
+    return true;                 /* connected - a host is live */
+  } catch {
+    return false;                /* refused, or unreachable - stale */
+  }
+}
 
 class IpcHost extends EventEmitter {
   constructor(opts = {}) {
@@ -40,9 +67,25 @@ class IpcHost extends EventEmitter {
      * host were already listening we would fail to bind and say so, rather
      * than silently taking over.
      */
-    try {
-      if (fs.existsSync(this.socketPath)) fs.unlinkSync(this.socketPath);
-    } catch { /* fall through to the bind error */ }
+    if (fs.existsSync(this.socketPath)) {
+      /*
+       * A socket file can mean two very different things: a live host, or a
+       * leftover from one that was killed. Unlinking unconditionally - as this
+       * did - silently evicts a running GUI: the emulator reconnects to
+       * whoever bound last and the GUI sits there with a dead socket, looking
+       * frozen. That happened every time a test harness started its own host.
+       *
+       * Probe first. Only a refused connection proves the file is stale.
+       */
+      const live = probeLiveSocket(this.socketPath);
+      if (live) {
+        throw new Error(
+          `another IPC host is already listening on ${this.socketPath} ` +
+          `(the GUI, most likely) - stop it, or pass a different socketPath`
+        );
+      }
+      try { fs.unlinkSync(this.socketPath); } catch { /* fall through to bind */ }
+    }
     fs.mkdirSync(path.dirname(this.socketPath), { recursive: true });
 
     this.server = net.createServer((sock) => this._onDevice(sock));

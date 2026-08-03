@@ -44,6 +44,28 @@ int usb_rawhid_available(void) {
   return okemu_hid_pending();
 }
 
+/*
+ * usb_dev.c's wipe_usb_buffer() walks the endpoint BDTs and usb_free()s every
+ * packet still queued on every endpoint. The firmware calls it once, at the end
+ * of the successful-unlock path in payload(), to throw away host traffic that
+ * arrived while the device was still locked ("Wipe old responses") so it is not
+ * then processed as though it had been sent by an authorised caller.
+ *
+ * Here the equivalent is simply to drop the queued inbound reports. Both the
+ * RawHID queue and the SEREMU byte queue are cleared, matching the hardware,
+ * where those are endpoint packet queues like any other.
+ *
+ * This was the last unresolved firmware symbol in the module, and because ELF
+ * binds lazily it did not fail at load time - it killed the process the first
+ * time a PIN was ever accepted, with a bare `symbol lookup error`. It stayed
+ * hidden while millis() was frozen (see okemu_systick_start), because the wait
+ * loop immediately above this call never terminated to reach it.
+ */
+void wipe_usb_buffer(void) {
+  okemu_hid_flush_in();
+  okemu_seremu_flush_in();
+}
+
 int usb_rawhid_send(const void *buffer, uint32_t timeout) {
   return okemu_hid_emit((const uint8_t *)buffer, 64, timeout, OKEMU_IFACE_FIDO);
 }

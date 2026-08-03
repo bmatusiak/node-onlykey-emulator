@@ -109,6 +109,30 @@ udevadm trigger --subsystem-match=misc --sysname-match=uhid || true
 udevadm trigger --subsystem-match=hidraw || true
 udevadm settle --timeout=5 || true
 
+# ---------------------------------------------------------------------------
+# The USB gadget transport (default).
+#
+# UHID alone is not enough to stand in for hardware: a UHID device has no USB
+# parent, so hidapi reports manufacturer '' and interface -1, and real software
+# identifies an OnlyKey by exactly those fields. dummy_hcd gives us a virtual
+# UDC so the gadget enumerates as a genuine USB device with real descriptors.
+#
+# Delegated to gadget-setup.sh rather than duplicated. Failure is not fatal:
+# the UHID bridge (OKEMU_BRIDGE=uhid) still works without it.
+# ---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/../build/dummy_hcd/dummy_hcd.ko" ]]; then
+  echo
+  echo "==> Setting up the USB gadget transport"
+  "$SCRIPT_DIR/gadget-setup.sh" || echo "    gadget setup failed - UHID still available"
+else
+  echo
+  echo "==> USB gadget transport NOT set up (dummy_hcd.ko not built)"
+  echo "    Build it first, as your normal user, then re-run this script:"
+  echo "      sudo apt install linux-source-\$(uname -r | cut -d- -f1) linux-headers-\$(uname -r)"
+  echo "      ./scripts/build-dummy-hcd.sh"
+fi
+
 echo
 echo "Done. /dev/uhid is now:"
 ls -l /dev/uhid || true

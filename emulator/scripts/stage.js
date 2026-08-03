@@ -115,6 +115,101 @@ const PATCHES = [
        '\tmemcpy(out, in, okemu_n);'],
       ['out[sizeof(out)-2]', 'out[okemu_n]'],
       ['\tout[sizeof(out)-1] = 0;', '\tout[okemu_n + 1] = 0;'],
+
+      // Same null-pointer-as-zero pattern as in OnlyKey.ino below.
+      ['okeeprom_eeset_timeout(0);',
+       '{ uint8_t okemu_zero = 0; okeeprom_eeset_timeout(&okemu_zero); }'],
+
+      /*
+       * THE 32-BIT ASSUMPTION. Every flash field the firmware owns is read and
+       * written through these two loops, which walk storage with
+       *
+       *     unsigned long *adr;  ...  adr++;
+       *
+       * On the MK20DX256 (ILP32) that steps 4 bytes - one flash word per
+       * iteration, which is what `z = z + 4` over the byte buffer means. On
+       * x86-64 (LP64) `unsigned long` is 8 bytes, so it steps 8 and every
+       * field is written into twice its own space, four data bytes followed by
+       * four untouched 0xFF:
+       *
+       *     noncehash  4B 3A E3 F3 FF FF FF FF 76 5E F3 4C FF FF FF FF ...
+       *
+       * Writers and readers were equally wrong, so any single field still
+       * round-tripped - which is why setup appeared to succeed. But the field
+       * OFFSETS are plain byte arithmetic on uintptr_t (`adr + EElen_noncehash`
+       * and friends), so they did NOT double. The setter put the PIN hash 64
+       * bytes into the sector while the getter read it from byte 32, halfway
+       * through the nonce. Hence a correct PIN producing a public key that
+       * matched what setup logged, yet never matching what was read back.
+       *
+       * Stepping a uint32_t* restores the hardware's stride exactly; the reads
+       * are already 32-bit-safe, since >>24/>>16/>>8 discard the high word.
+       */
+      ['void okcore_flashget_common(uint8_t *ptr, unsigned long *adr, int len)\n{\n' +
+       '\tfor (int z = 0; z <= len - 4; z = z + 4)',
+       'void okcore_flashget_common(uint8_t *ptr, unsigned long *okemu_adr, int len)\n{\n' +
+       '\tuint32_t *adr = (uint32_t *)okemu_adr;\n' +
+       '\tfor (int z = 0; z <= len - 4; z = z + 4)'],
+      ['void okcore_flashset_common(uint8_t *ptr, unsigned long *adr, int len)\n{\n' +
+       '\tfor (int z = 0; z <= len - 4; z = z + 4)',
+       'void okcore_flashset_common(uint8_t *ptr, unsigned long *okemu_adr, int len)\n{\n' +
+       '\tuint32_t *adr = (uint32_t *)okemu_adr;\n' +
+       '\tfor (int z = 0; z <= len - 4; z = z + 4)'],
+
+      /*
+       * byteprint() is the firmware's debug hex dumper, and callers hand it
+       * null freely - webcryptcheck() does `byteprint(_appid, 32)` on a path
+       * where ctap_filter_invalid_credentials() passes no appid at all. On the
+       * MK20DX256 that reads flash from address 0 and prints 32 bytes of vector
+       * table; the output is meaningless either way and nothing consumes it.
+       * Hosted it is a segfault, which killed the device mid-CTAP2 getAssertion
+       * on the very first FIDO request.
+       *
+       * Printing nothing for a null pointer is the same non-result without the
+       * crash. (Mapping page zero would reproduce hardware exactly, but needs
+       * vm.mmap_min_addr=0 - see the OnlyKey.ino patch.)
+       */
+      ['void byteprint(uint8_t *bytes, int size)\n{\n#ifdef DEBUG\n\tSerial.println();',
+       'void byteprint(uint8_t *bytes, int size)\n{\n#ifdef DEBUG\n\tif (!bytes) return;\n\tSerial.println();'],
+
+      /*
+       * factorydefault()'s DEBUG-only dump walks 64 KB from address 0. Page
+       * zero is deliberately left unmapped here (see the OnlyKey.ino patch),
+       * so it faults on the first read. Start at the first mapped flash page;
+       * this is diagnostic output only and nothing depends on its contents.
+       */
+      ['\t\tuintptr_t adr = 0x0;\n\t\tfor (int i = 0; i < 65536; i += 4)',
+       '\t\tuintptr_t adr = 0x1000;\n\t\tfor (int i = 0; i < 65536; i += 4)'],
+    ],
+  },
+  {
+    /*
+     * `okeeprom_eeset_*(0)` passes a null POINTER, not a value: the setters
+     * take `uint8_t *ptr` and okeeprom_eeset_common() does `*ptr++`. The
+     * author meant "store 0", and on the MK20DX256 that is exactly what
+     * happens - address 0 is the start of flash, whose first word is the
+     * vector table's initial stack pointer (_estack = 0x20008000). Read
+     * little-endian, byte 0 is 0x00, so the write stores zero and the
+     * firmware is correct by coincidence.
+     *
+     * Hosted, page zero is unmapped and the same read is a segfault. It fired
+     * on OnlyKey.ino:700, in the branch taken when a CORRECT PIN has just been
+     * entered - so the device rebooted at the moment of a successful unlock and
+     * never reached `unlocked = true`, which looked exactly like a rejected PIN.
+     *
+     * Storing a real zero byte reproduces the hardware result without relying
+     * on page zero being mapped. (Mapping it would need vm.mmap_min_addr=0,
+     * which would remove NULL-dereference protection machine-wide; 4096 is
+     * enough for everything else the firmware reaches.)
+     */
+    file: 'sketch/OnlyKey.ino',
+    edits: [
+      ['okeeprom_eeset_sincelastregularlogin (0);',
+       '{ uint8_t okemu_zero = 0; okeeprom_eeset_sincelastregularlogin(&okemu_zero); }'],
+      ['okeeprom_eeset_failedlogins(0);',
+       '{ uint8_t okemu_zero = 0; okeeprom_eeset_failedlogins(&okemu_zero); }'],
+      ['okeeprom_eeset_sincelastregularlogin(0);',
+       '{ uint8_t okemu_zero = 0; okeeprom_eeset_sincelastregularlogin(&okemu_zero); }'],
     ],
   },
   {

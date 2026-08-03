@@ -75,20 +75,35 @@ async function main() {
   ipc.on('disconnect', () => log('GUI detached - retrying'));
   ipc.on('error', (err) => log('IPC error:', err.message));
 
-  /* Optional UHID bridge - presents the emulated device to the real OS. */
+  /*
+   * Optional HID bridge - presents the emulated device to the real OS.
+   *
+   * Default is the USB-gadget bridge (dummy_hcd + f_hid), because only a real
+   * USB device carries the descriptor fields software identifies an OnlyKey
+   * by: hidapi reports manufacturer '' and interface -1 for a UHID device,
+   * which no unmodified client can match. OKEMU_BRIDGE=uhid selects the old
+   * transport, which needs no kernel module and is still useful for
+   * HID-plumbing work where those fields do not matter.
+   */
   let bridge = null;
   if (args.uhid) {
+    const kind = process.env.OKEMU_BRIDGE === 'uhid' ? 'uhid' : 'gadget';
+    const mod = kind === 'uhid' ? '../lib/uhid-bridge' : '../lib/gadget-bridge';
     try {
-      const UhidBridge = require('../lib/uhid-bridge');
-      bridge = new UhidBridge(emu);
+      const Bridge = require(mod);
+      bridge = new Bridge(emu);
       bridge.start();
       ipc.uhid = true;
       ipc.plugged = true;
-      log('UHID bridge active - device visible to the OS');
+      log(`${kind} bridge active - device visible to the OS`);
     } catch (err) {
+      bridge = null;
       ipc.uhid = false;
-      log(`UHID bridge unavailable (${err.message})`);
-      log('  the emulator still works over IPC; run scripts/setup-permissions.sh once to enable it');
+      log(`${kind} bridge unavailable (${err.message})`);
+      log(kind === 'gadget'
+        ? '  run  sudo ./scripts/gadget-setup.sh  once to enable it'
+        : '  run  sudo ./scripts/setup-permissions.sh  once to enable it');
+      log('  the emulator still works over IPC either way');
     }
   }
 

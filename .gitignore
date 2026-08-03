@@ -18,6 +18,20 @@ build/Debug/
 # generated file list (produced by scripts/gen-sources.js)
 emulator/sources.gypi
 
+# --- out-of-tree kernel module ---------------------------------------------
+# dummy_hcd is the virtual USB Device Controller the gadget transport binds to.
+# Ubuntu ships `# CONFIG_USB_DUMMY_HCD is not set`, so it is compiled locally by
+# scripts/build-dummy-hcd.sh from linux-source. Everything here is generated and
+# tied to one exact kernel release - rebuild rather than commit it.
+build/
+*.ko
+*.ko.cmd
+*.mod
+*.mod.c
+*.symvers
+*.order
+.tmp_versions/
+
 # --- emulated device state -------------------------------------------------
 # Simulated flash / EEPROM images. These are the emulated OnlyKey's persistent
 # storage - device keys, PINs and slot data live here, so they are both
