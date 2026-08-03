@@ -14,10 +14,44 @@ EEPROM that persist across restarts.
 
 ## Requirements
 
-* Linux (the HID bridge uses the kernel's UHID interface)
+* Linux. The default transport is a **USB gadget** (`dummy_hcd` + `f_hid`), which
+  needs kernel headers and matching kernel source to build one small module —
+  see [Why a USB gadget](#why-a-usb-gadget). A UHID fallback needs neither.
 * Node.js 18+ and a C++ toolchain (`build-essential`, `python3`)
 * [pm2](https://pm2.keymetrics.io/) — supervises the emulator process
 * The firmware sources and Teensyduino toolchain under `onlykey/` (see `setup.sh`)
+
+### Why a USB gadget
+
+Real software identifies an OnlyKey by fields that come from the USB
+descriptor. The test kit does
+
+```js
+d.manufacturer === 'CRYPTOTRUST' && d.product === 'ONLYKEY' && d.interface === 3
+```
+
+and python-onlykey and `@vincss-public-projects/fido2-client` do the same.
+A UHID device has no USB parent, so hidapi cannot supply `manufacturer` or
+`interface` — it reports `''` and `-1`, always, and **no unmodified client can
+match it**. Since nothing under `onlykey/` may be changed to accommodate the
+emulator, the emulator has to present those fields for real.
+
+`dummy_hcd` provides a virtual USB Device Controller; the gadget bound to it
+enumerates through the kernel's own USB stack:
+
+```
+$ lsusb -d 1d50:60fc
+Bus 005 Device 002: ID 1d50:60fc OpenMoko, Inc. OnlyKey Two-factor Authentication…
+
+iface=0 usagePage=0x0001 manufacturer="CRYPTOTRUST" product="ONLYKEY"
+iface=1 usagePage=0xf1d0 manufacturer="CRYPTOTRUST" product="ONLYKEY"
+iface=2 usagePage=0xffab manufacturer="CRYPTOTRUST" product="ONLYKEY"
+iface=3 usagePage=0xffc9 manufacturer="CRYPTOTRUST" product="ONLYKEY"
+```
+
+Set `OKEMU_BRIDGE=uhid` to use the old UHID transport instead. It needs no
+kernel module and is fine for HID-plumbing work, but the unmodified test kit
+cannot see it.
 
 ---
 
@@ -29,16 +63,47 @@ EEPROM that persist across restarts.
 ./setup.sh
 ```
 
-### 2. Grant access to `/dev/uhid`
+### 2. Build the `dummy_hcd` module
 
-`/dev/uhid` is root-only by default. Installing a udev rule once means
-**nothing afterwards needs sudo** — not the daemon, not pm2, not the GUI.
+Ubuntu ships `# CONFIG_USB_DUMMY_HCD is not set`, so no package provides it and
+it has to be compiled. Everything else the gadget needs (`libcomposite`,
+`usb_f_hid`, `CONFIG_USB_CONFIGFS_F_HID`) is already in the stock kernel.
 
-Either run the script:
+```sh
+sudo apt install linux-headers-$(uname -r) linux-source-$(uname -r | cut -d- -f1)
+./scripts/build-dummy-hcd.sh          # no root needed
+```
+
+The result lands in `build/dummy_hcd/dummy_hcd.ko` (gitignored — it is tied to
+one exact kernel release, so rebuild it rather than commit it).
+
+### 3. Grant device access (one-time, root)
+
+Both transports need device nodes that are root-only by default. Doing this
+once means **nothing afterwards needs sudo** — not the daemon, not pm2, not the
+GUI. One script covers everything:
 
 ```sh
 sudo ./scripts/setup-permissions.sh
 ```
+
+It installs the udev rules (`/dev/uhid` and `/dev/hidg*`), lowers
+`vm.mmap_min_addr`, and — if `dummy_hcd.ko` was built in step 2 — installs the
+module and creates the USB gadget by delegating to
+[`scripts/gadget-setup.sh`](scripts/gadget-setup.sh). That script can also be
+run on its own:
+
+```sh
+sudo ./scripts/gadget-setup.sh          # create and bind
+sudo ./scripts/gadget-setup.sh --down   # tear down
+```
+
+The gadget is built from [`emulator/lib/hid-descriptors.js`](emulator/lib/hid-descriptors.js),
+which is the single source of truth for the four interfaces — the UHID bridge
+builds its `UHID_CREATE2` from the same table, so the two transports cannot
+drift apart.
+
+The udev/uhid half by hand, if you prefer:
 
 …or do the same by hand:
 
@@ -91,7 +156,7 @@ segfaults the moment it encrypts anything, such as storing a PIN.
 Without it the emulator still boots and the HID interfaces work, but any
 crypto operation will crash; it prints a warning at startup saying so.
 
-### 3. Build the native module
+### 4. Build the native module
 
 ```sh
 cd emulator
@@ -150,11 +215,27 @@ emulator — the emulator dials in whenever it comes up. It holds no authority
 over the device and survives the daemon restarting underneath it; the status
 dot goes red and back to green as the device detaches and re-attaches.
 
-**Unplug / Plug in** models the USB cable: it tears the HID interfaces down and
-back up, so the OS and every client see the key removed and reinserted (hidraw
-nodes are renumbered on re-plug, exactly as on real re-enumeration). The
-firmware keeps running with its RAM intact — for a power cycle use *Restart
-device*.
+**Unplug / Plug in** is a real power cycle, because that is what it is on
+hardware: an OnlyKey is bus-powered, so pulling the cable both removes it from
+the bus *and* cuts power to the MCU. Unplug therefore unbinds the gadget from
+the UDC — Linux stops seeing the device entirely, and the hidraw nodes are
+renumbered on re-plug exactly as on real re-enumeration — **and** stops the
+emulator process, so the firmware loses its RAM.
+
+That matters for more than realism. `exceeded_login_attempts()` is
+
+```c
+while (1==1) { hidprint("Error password attempts for this session exceeded, "
+                        "remove OnlyKey and reinsert to attempt login"); }
+```
+
+an infinite loop with no exit: on hardware the removal resets the MCU, which is
+the only way out. While unplug left the firmware running, the device's own
+documented recovery did nothing.
+
+Stopping goes through `pm2 stop` rather than `process.exit()` — pm2's job here
+is respawning the daemon after `CPU_RESTART()`, so a plain exit would come
+straight back up. *Restart device* remains the reboot-without-unplugging path.
 
 ---
 
@@ -236,22 +317,74 @@ memory that store would silently succeed and the firmware would keep running in
 a state it believes is unreachable, so that page is mapped read-only and the
 resulting fault parks the firmware thread and raises a `restart` event.
 
+### Running 32-bit firmware on a 64-bit host
+
+The firmware is correct on an ILP32 target and not always correct here. Two
+classes of divergence, both fixed by staged patches:
+
+**Pointer size.** Every flash field is read and written through
+`okcore_flashget/set_common`, which walk storage with `unsigned long *adr;
+adr++`. That steps 4 bytes on the MK20DX256 and **8** on x86-64, so each field
+was written into twice its own space — four data bytes then four untouched
+`0xFF`:
+
+```
+noncehash  4B 3A E3 F3 FF FF FF FF 76 5E F3 4C FF FF FF FF ...
+```
+
+Readers and writers were equally wrong, so any single field still round-tripped
+— which is why setup appeared to work. But the field *offsets* are plain byte
+arithmetic (`adr + EElen_noncehash`), so they did not double: the setter put
+the PIN hash 64 bytes into the sector while the getter read it from byte 32,
+halfway through the nonce.
+
+**Address zero is readable flash on the target.** `okeeprom_eeset_failedlogins(0)`
+passes a null *pointer*, not a value; on hardware that reads the vector table's
+initial stack pointer, whose low byte is `0x00`, so it stores zero and is
+correct by coincidence. Hosted, page zero is unmapped and it is a segfault —
+which fired on the branch taken when a *correct* PIN had just been entered.
+`byteprint(NULL, 32)` and `factorydefault()`'s 64 KB dump from 0 are the same
+pattern.
+
+Two host-side bugs of the same flavour are worth knowing about:
+`systick_millis_count` must be advanced by a thread standing in for the SysTick
+interrupt, because `payload()` waits in `while (millis() < wait) recvmsg(0);`
+and never calls `micros()`; and `f_hid`'s interrupt-IN queue is shallow, so
+device→host reports must be queued and retried on `EAGAIN` rather than
+dropped — discarding them lost the debug output the test harness synchronises
+on.
+
 **The upstream sources under `onlykey/` are never modified.**
 [`emulator/scripts/stage.js`](emulator/scripts/stage.js) assembles a build tree
 by copying — the same thing OnlyKey's own `in-docker-build.sh` does — and layers
-`emulator/core-override/` on top. It applies exactly three documented textual
-patches, listed in `PATCHES` in that file. Regenerate with `npm run stage`;
-never edit `emulator/.stage/` directly.
+`emulator/core-override/` on top. Every change is a documented textual patch in
+the `PATCHES` list in that file, each with its rationale. Regenerate with
+`npm run stage`; never edit `emulator/.stage/` directly.
 
 ```
 emulator/
   binding.gyp          two targets: firmware (gnu++11) + N-API addon (C++17)
   index.js             EventEmitter wrapper
   bin/daemon.js        the process pm2 supervises
-  lib/                 IPC protocol, server, client
+  lib/
+    hid-descriptors.js the four HID interfaces - one source of truth
+    gadget-bridge.js   USB gadget transport (default)
+    uhid-bridge.js     UHID transport (OKEMU_BRIDGE=uhid)
+    power.js           unplug = unbind UDC + pm2 stop
+    ipc-host.js        the GUI listens
+    ipc-peer.js        the emulator dials in
   src/                 HAL, flash, restart trap, N-API surface
   core-override/       host replacements for the Teensy peripheral drivers
   shim/                headers that shadow upstream ones
   scripts/             stage.js, gen-sources.js
   .stage/              generated build tree (gitignored)
+
+scripts/
+  build-dummy-hcd.sh   compile dummy_hcd out of tree (no root)
+  gadget-setup.sh      create/bind the USB gadget (root, one-time)
+  setup-permissions.sh udev rules, sysctl, and the above (root, one-time)
 ```
+
+The native addon knows nothing about Linux: it exposes HID as events and a
+send call, and the bridge modules are plain JS that drive the OS. Swapping UHID
+for the USB gadget touched only `lib/`, leaving the addon, IPC and GUI alone.

@@ -11,12 +11,16 @@
  * The GUI's "recompile and restart" is the same path with `npm run build`
  * first, so a firmware source change is picked up by the new process.
  *
- * Nothing here needs root. /dev/uhid access is granted once by
+ * Nothing here needs root. Device access is granted once by
  * scripts/setup-permissions.sh; if it is missing we run without a real HID
  * device and say so, rather than failing to start.
  *
+ * The transport defaults to the USB gadget (dummy_hcd + f_hid), which is the
+ * only one that presents the USB descriptor fields real software identifies an
+ * OnlyKey by. OKEMU_BRIDGE=uhid selects the older UHID bridge.
+ *
  * Usage:
- *   node bin/daemon.js [--socket PATH] [--storage DIR] [--no-uhid]
+ *   node bin/daemon.js [--socket PATH] [--storage DIR] [--no-hid] [--quiet]
  */
 'use strict';
 
@@ -35,12 +39,14 @@ function parseArgs(argv) {
   const out = { uhid: true, socket: defaultSocketPath(), storage: null, quiet: false };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--no-uhid') out.uhid = false;
+    /* --no-uhid is the old spelling, kept working: it disables whichever
+     * transport is selected, not UHID specifically. */
+    if (a === '--no-hid' || a === '--no-uhid') out.uhid = false;
     else if (a === '--quiet') out.quiet = true;
     else if (a === '--socket') out.socket = argv[++i];
     else if (a === '--storage') out.storage = argv[++i];
     else if (a === '--help' || a === '-h') {
-      console.log('usage: daemon.js [--socket PATH] [--storage DIR] [--no-uhid] [--quiet]');
+      console.log('usage: daemon.js [--socket PATH] [--storage DIR] [--no-hid] [--quiet]');
       process.exit(0);
     }
   }
@@ -108,9 +114,17 @@ async function main() {
   }
 
   /*
-   * Plug / unplug from the GUI. This tears the HID interfaces down and back
-   * up, so the OS and every client see the key removed and reinserted, while
-   * the firmware keeps running - the USB cable, not the power.
+   * Bus-only detach, over IPC.
+   *
+   * This removes the device from the bus but leaves the firmware running with
+   * its RAM. That is NOT what the GUI's Unplug button does: an OnlyKey is
+   * bus-powered, so pulling the cable also cuts power, and the GUI drives that
+   * through lib/power.js (unbind the UDC, then `pm2 stop`) precisely because a
+   * process cannot start itself again once stopped.
+   *
+   * Kept because it is genuinely useful on its own - it exercises
+   * re-enumeration without losing device state, which is what you want when
+   * testing how a client copes with the key disappearing mid-session.
    */
   ipc.on('set-plugged', (want) => {
     if (!bridge) return;
