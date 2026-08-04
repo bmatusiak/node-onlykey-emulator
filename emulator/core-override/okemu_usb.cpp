@@ -198,15 +198,31 @@ int usb_keyboard_press(uint8_t key, uint8_t modifier) {
   return 0;
 }
 
+/*
+ * Two generations of keylayouts.h are in play, and the build mixes them. The
+ * stock Teensyduino 1.27 core encodes KEY_* as (n | 0x4000) and MODIFIERKEY_*
+ * as (n | 0x8000), which is what its usb_keyboard.c branches on. OnlyKey ships
+ * a newer keylayouts.h that shadows it, using (n | 0xF000) and (n | 0xE000) -
+ * and that is the one okcore.cpp is compiled against, so Keyboard.press(
+ * KEY_RETURN) arrives here as 0xF028.
+ *
+ * Handling only the old ranges silently dropped every KEY_* press: backup marks
+ * its line breaks with Keyboard.press(KEY_RETURN) once per 57-byte chunk, so a
+ * backup came out as one unbroken run of characters. Both encodings are
+ * accepted, since this file has to satisfy whichever header it is built with.
+ */
+static int okemu_raw_key(uint8_t msb, uint16_t n, uint8_t *key, uint8_t *mod) {
+  if (msb == 0x80 || msb == 0xE0) { *key = 0; *mod = (uint8_t)n; return 1; }
+  if (msb == 0x40 || msb == 0xF0) { *key = (uint8_t)n; *mod = 0; return 1; }
+  return 0;
+}
+
 void usb_keyboard_press_keycode(uint16_t n) {
-  uint8_t msb = n >> 8;
+  uint8_t msb = n >> 8, key, mod;
   if (msb >= 0xC2 && msb <= 0xDF) {
     n = (n & 0x3F) | ((uint16_t)(msb & 0x1F) << 6);
-  } else if (msb == 0x80) {
-    okemu_press_key(0, (uint8_t)n);
-    return;
-  } else if (msb == 0x40) {
-    okemu_press_key((uint8_t)n, 0);
+  } else if (okemu_raw_key(msb, n, &key, &mod)) {
+    okemu_press_key(key, mod);
     return;
   }
   uint16_t keycode = okemu_unicode_to_keycode(n);
@@ -215,14 +231,11 @@ void usb_keyboard_press_keycode(uint16_t n) {
 }
 
 void usb_keyboard_release_keycode(uint16_t n) {
-  uint8_t msb = n >> 8;
+  uint8_t msb = n >> 8, key, mod;
   if (msb >= 0xC2 && msb <= 0xDF) {
     n = (n & 0x3F) | ((uint16_t)(msb & 0x1F) << 6);
-  } else if (msb == 0x80) {
-    okemu_release_key(0, (uint8_t)n);
-    return;
-  } else if (msb == 0x40) {
-    okemu_release_key((uint8_t)n, 0);
+  } else if (okemu_raw_key(msb, n, &key, &mod)) {
+    okemu_release_key(key, mod);
     return;
   }
   uint16_t keycode = okemu_unicode_to_keycode(n);
