@@ -116,12 +116,23 @@ fi
 #
 # Only needed to build a .hex for real hardware, or to check that a firmware
 # change still compiles for the device. The emulator itself does not use it.
-if command -v docker >/dev/null 2>&1; then
-  echo "== building the firmware toolchain image"
-  make -C ./arduino-1.6.5-r5-teensy_127 docker-build-toolchain
-else
+#
+# The image must be amd64 whatever the host is: the legacy Arduino/Teensyduino
+# bundle ships pre-compiled x86_64 binaries, so a native arm64 build succeeds and
+# then produces an image that cannot execute them. DOCKER_DEFAULT_PLATFORM is a
+# no-op on x86_64 and routes through qemu-user-static's binfmt handler elsewhere
+# - correct but slow. `make docker-build` needs the same variable set.
+if ! command -v docker >/dev/null 2>&1; then
   echo "!! docker not found - skipping the firmware toolchain image."
   echo "   The emulator still builds; you just cannot produce a device .hex."
+elif [ "$(uname -m)" != "x86_64" ] && [ ! -e /proc/sys/fs/binfmt_misc/qemu-x86_64 ]; then
+  echo "!! no qemu-x86_64 binfmt handler - skipping the firmware toolchain image."
+  echo "   Install qemu-user-static and binfmt-support, then re-run to build it."
+  echo "   The emulator still builds; you just cannot produce a device .hex."
+else
+  echo "== building the firmware toolchain image (linux/amd64)"
+  DOCKER_DEFAULT_PLATFORM=linux/amd64 \
+    make -C ./arduino-1.6.5-r5-teensy_127 docker-build-toolchain
 fi
 
 # --- node -------------------------------------------------------------------
@@ -130,8 +141,13 @@ fi
 # neither dependencies nor workspaces, so installing there does not reach it.
 echo "== building the emulator addon"
 cd "$ROOT/emulator"
-npm install
-npm run build
+# gypfile:true makes npm run `node-gyp rebuild` as an implicit install script.
+# binding.gyp includes sources.gypi, which only `npm run stage` generates - and
+# that runs later - so the implicit build always fails on a fresh checkout.
+# Skip it, then drive the real build through rebuild (stage -> configure ->
+# build); plain `build` would skip configure and find no Makefile.
+npm install --ignore-scripts
+npm run rebuild
 
 echo "== installing the GUI"
 cd "$ROOT/ui"
