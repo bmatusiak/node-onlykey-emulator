@@ -32,10 +32,18 @@ function defaultSocketPath() {
  *  log      {text}                        SEREMU debug output
  *  hid      {iface, name, dir, data}      any HID traffic, both directions
  *  restart  {}                            firmware ran CPU_RESTART()
+ *  kbdReport{id, data}                    base64, reply to kbdGetReport
  * ---- client -> server ---------------------------------------------------
  *  press        {button, hold, ticks}     hold: tap|hold|long|longest
  *  setButton    {button, down}            raw analog pad
  *  writeHid     {iface, data}             base64
+ *  kbdSetReport {data}                    base64; HID SET_REPORT 0x0921 on the
+ *                                         KEYBOARD interface - a control
+ *                                         transfer, NOT an interrupt OUT, so it
+ *                                         reaches process_setreport() rather
+ *                                         than the usual HID path
+ *  kbdGetReport {id}                      HID GET_REPORT 0x01a1; answered by a
+ *                                         kbdReport event carrying the same id
  *  factoryReset {}
  *  restartDevice{}
  *  rebuild      {}                        recompile, then exit for pm2

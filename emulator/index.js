@@ -168,6 +168,32 @@ class OnlyKeyEmulator extends EventEmitter {
   wipeUserspace()  { this.writeHid(Buffer.from('0C\n', 'latin1'), IFACE.SEREMU); }
   wipeAll()        { this.writeHid(Buffer.from('9C\n', 'latin1'), IFACE.SEREMU); }
 
+  /*
+   * HID CONTROL TRANSFERS ON THE KEYBOARD INTERFACE, WHICH ARE NOT writeHid().
+   *
+   * SET_REPORT (0x0921) and GET_REPORT (0x01a1) are a different transfer type
+   * from the interrupt OUT reports writeHid() sends, and they reach a different
+   * handler: process_setreport() in okcore.cpp, which is the Yubikey-style
+   * HMAC-SHA1 challenge-response channel. Nothing else in this API can reach it
+   * - an interrupt OUT report on IFACE.KEYBOARD is simply not a control
+   * transfer, so device.send(KEYBOARD, ...) goes somewhere else entirely.
+   *
+   * The firmware side has been ported all along (core-override/okemu_usb.cpp
+   * carries the whole state machine, including the multi-report 0xC0..0xC3 read
+   * and the waiting-for-a-press path) and uhid-bridge.js already drives it for
+   * the gadget. These two methods are what let an IPC client reach the same
+   * place without a kernel device node.
+   */
+  kbdSetReport(buffer) {
+    if (!Buffer.isBuffer(buffer)) buffer = Buffer.from(buffer);
+    return native.kbdSetReport(buffer);
+  }
+
+  /** Device -> host, the answer side of the same channel. Returns a Buffer. */
+  kbdGetReport() {
+    return native.kbdGetReport();
+  }
+
   /** Host -> device on a writable interface (FIDO, vendor or SEREMU). */
   writeHid(buffer, iface = IFACE.FIDO) {
     if (!Buffer.isBuffer(buffer)) buffer = Buffer.from(buffer);

@@ -121,6 +121,22 @@ class IpcPeer extends EventEmitter {
         case 'restartDevice': this.emu.restartDevice(); break;
         case 'rebuild':       this.emit('rebuild'); break;
         case 'setPlugged':    this.emit('set-plugged', !!msg.plugged); break;
+        /*
+         * The keyboard control-transfer pair. Reply-carrying, unlike every
+         * other command here, because GET_REPORT's whole point is the answer -
+         * and the id is carried through so a caller reading the multi-report
+         * 0xC0..0xC3 sequence cannot match a stale reply to a new request.
+         */
+        case 'kbdSetReport':
+          this.emu.kbdSetReport(b64.unpack(msg.data));
+          break;
+        case 'kbdGetReport':
+          this._send({
+            t: 'kbdReport',
+            id: msg.id,
+            data: b64.pack(this.emu.kbdGetReport() || Buffer.alloc(0)),
+          });
+          break;
         case 'getState':
           this._send({
             t: 'state',

@@ -139,6 +139,8 @@ class IpcHost extends EventEmitter {
   press(button, opts = {}) { this._send({ t: 'press', button, hold: opts.hold, ticks: opts.ticks }); }
   setButton(button, down)  { this._send({ t: 'setButton', button, down: !!down }); }
   writeHid(iface, data)    { this._send({ t: 'writeHid', iface, data: b64.pack(data) }); }
+  kbdSetReport(data)       { this._send({ t: 'kbdSetReport', data: b64.pack(data) }); }
+  kbdGetReport(id)         { this._send({ t: 'kbdGetReport', id }); }
   factoryReset()           { this._send({ t: 'factoryReset' }); }
   restartDevice()          { this._send({ t: 'restartDevice' }); }
   rebuild()                { this._send({ t: 'rebuild' }); }
