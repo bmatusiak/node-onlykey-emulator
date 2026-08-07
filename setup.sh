@@ -70,7 +70,7 @@ clone https://github.com/bm-ok/OnlyKey-Firmware            ./OnlyKey-Firmware
 clone https://github.com/bm-ok/0c-coder-onlykey.github.io  ./onlykey.github.io
 clone https://github.com/bm-ok/0c-coder-lib-agent          ./lib-agent
 clone https://github.com/bm-ok/0c-coder-python-onlykey     ./python-onlykey
-clone https://github.com/bm-ok/onlykey-alpha-testing       ./onlykey-testing
+clone https://github.com/bm-ok/onlykey-testing             ./onlykey-testing
 
 git -C ./python-onlykey submodule update --init onlykey-solo-python
 
