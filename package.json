@@ -7,6 +7,13 @@
   "type": "commonjs",
   "main": "index.js",
   "scripts": {
+    "pm2:add": "pm2 start ecosystem.config.js",
+    "pm2:start": "pm2 start onlykey-emulator",
+    "pm2:stop": "pm2 stop onlykey-emulator || true",
+    "pm2:restart": "pm2 restart onlykey-emulator",
+    "pm2:remove": "pm2 delete onlykey-emulator || true",
+    "pm2:logs": "pm2 logs onlykey-emulator",
+    "pm2:status": "pm2 status onlykey-emulator",
     "test": "echo \"Error: no test specified\" && exit 1"
   }
 }
