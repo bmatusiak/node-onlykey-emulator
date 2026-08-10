@@ -71,6 +71,7 @@ clone https://github.com/bm-ok/0c-coder-onlykey.github.io  ./onlykey.github.io
 clone https://github.com/bm-ok/0c-coder-lib-agent          ./lib-agent
 clone https://github.com/bm-ok/0c-coder-python-onlykey     ./python-onlykey
 clone https://github.com/bm-ok/onlykey-testing             ./onlykey-testing
+clone https://github.com/bm-ok/OnlyKey-App                 ./OnlyKey-App
 
 git -C ./python-onlykey submodule update --init onlykey-solo-python
 
@@ -152,6 +153,17 @@ npm run rebuild
 echo "== installing the GUI"
 cd "$ROOT/ui"
 npm install
+
+# The checkouts that are Node projects in their own right. None of them is a
+# workspace of this repo - they are swappable components - so each needs its own
+# install: the test kit for node-hid and the @noble crypto it verifies against,
+# the OnlyKey App for NW.js, and the web apps for their webpack build.
+for pkg in onlykey-testing OnlyKey-App onlykey.github.io; do
+  if [ -f "$ROOT/onlykey/$pkg/package.json" ]; then
+    echo "== installing $pkg"
+    (cd "$ROOT/onlykey/$pkg" && npm install)
+  fi
+done
 
 cd "$ROOT"
 npm install
