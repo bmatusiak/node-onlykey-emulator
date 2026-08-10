@@ -60,8 +60,20 @@ else
   SUDO="sudo"
   # Prompt once up front rather than at each step, so the run does not stall
   # halfway through waiting for a password.
-  echo "==> This needs root for a few steps; authenticating once now"
-  sudo -v || { echo "    cannot elevate - aborting" >&2; exit 1; }
+  #
+  # `sudo -n true` first, and not just `sudo -v`: -v validates against every
+  # rule that matches the user, so on a host where a NOPASSWD entry sits
+  # alongside the stock `%sudo ALL=(ALL:ALL) ALL` it demands a password that no
+  # actual command here will ever be asked for. That is the common case on a
+  # dev box, and it fails outright with no controlling terminal - CI, a
+  # container, an editor's task runner - even though every step below would
+  # have run unattended.
+  if sudo -n true 2>/dev/null; then
+    echo "==> Root available without a password"
+  else
+    echo "==> This needs root for a few steps; authenticating once now"
+    sudo -v || { echo "    cannot elevate - aborting" >&2; exit 1; }
+  fi
 fi
 
 echo "==> Loading the uhid kernel module"
@@ -144,9 +156,14 @@ echo "==> USB gadget transport"
 # Built as the invoking user, not root: the output lands in the repo's build/
 # directory and root-owned artifacts there would need sudo to clean up later.
 if [[ ! -f $KO ]]; then
-  if [[ ! -d /lib/modules/$(uname -r)/build || ! -f /usr/src/linux-source-$(uname -r | cut -d- -f1).tar.bz2 ]]; then
-    echo "    Kernel headers and/or source are missing. Install them, then re-run:"
-    echo "      sudo apt install linux-headers-\$(uname -r) linux-source-\$(uname -r | cut -d- -f1)"
+  # Only the headers are checked here. The kernel source used to be checked too,
+  # but build-dummy-hcd.sh now falls back to the archive when no linux-source
+  # package exists for this kernel - which is always the case on HWE - so
+  # requiring the tarball up front would skip the gadget on hosts that can
+  # perfectly well build it.
+  if [[ ! -d /lib/modules/$(uname -r)/build ]]; then
+    echo "    Kernel headers are missing. Install them, then re-run:"
+    echo "      sudo apt install linux-headers-\$(uname -r)"
     echo "    Skipping the gadget; the UHID transport (OKEMU_BRIDGE=uhid) still works."
   else
     echo "    dummy_hcd.ko not built yet - building it now (unprivileged)"

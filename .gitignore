@@ -45,4 +45,5 @@ eeprom.bin
 npm-debug.log*
 .DS_Store
 
+onlykey/okpqc-venv
 # /onlykey

@@ -101,10 +101,31 @@ optional and only gates the device `.hex` build.
 The gadget needs `dummy_hcd`, which Ubuntu does not ship
 (`# CONFIG_USB_DUMMY_HCD is not set`), so it has to be compiled — everything
 else it needs (`libcomposite`, `usb_f_hid`, `CONFIG_USB_CONFIGFS_F_HID`) is
-already in the stock kernel. Install the kernel headers and source first:
+already in the stock kernel. Install the kernel headers first:
 
 ```sh
-sudo apt install linux-headers-$(uname -r) linux-source-$(uname -r | cut -d- -f1)
+sudo apt install linux-headers-$(uname -r)
+```
+
+Headers are the only requirement. `dummy_hcd.c` itself is found wherever this
+host happens to keep it — [`build-dummy-hcd.sh`](scripts/build-dummy-hcd.sh)
+tries the kernel build tree (which has the sources on a self-built or mainline
+kernel), then an unpacked tree or a `linux-source-*` tarball under `/usr/src`,
+and failing those reads the single file out of the source tarball in the archive
+pool, stopping the transfer as soon as it has it.
+
+That last route is not a fallback for unusual setups — it is the *normal* one on
+an HWE kernel. Ubuntu publishes `linux-source-<ver>` only for a release's own
+kernel; an HWE kernel is built from a differently-named source package
+(`linux-hwe-7.0` for `7.0.0-28-generic` on noble) that ships no such binary, so
+`apt install linux-source-7.0.0` cannot work and never will, and `apt-get source`
+cannot reach it either with `deb-src` off by default. Nothing in the script
+hard-codes a version, so the same logic holds across a kernel upgrade.
+
+If your kernel is from somewhere none of that covers, hand it the file directly:
+
+```sh
+OKEMU_DUMMY_HCD_SRC=/path/to/dummy_hcd.c ./scripts/build-dummy-hcd.sh
 ```
 
 Then run **the one setup command** — as yourself, *without* sudo. It elevates
@@ -129,6 +150,14 @@ Two helpers it calls, occasionally useful on their own:
 ./scripts/build-dummy-hcd.sh            # rebuild the module (no root)
 sudo ./scripts/gadget-setup.sh --down   # tear the gadget down
 sudo systemctl restart onlykey-gadget   # rebuild it
+```
+
+A kernel upgrade needs both of those: an out-of-tree module is built for one
+`vermagic` and the new kernel will not load the old `.ko`, so the boot-time
+gadget service comes up with no UDC until you re-run
+
+```sh
+./scripts/build-dummy-hcd.sh && ./scripts/setup-permissions.sh
 ```
 
 The gadget is built from [`emulator/lib/hid-descriptors.js`](emulator/lib/hid-descriptors.js),
